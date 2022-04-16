@@ -362,7 +362,7 @@ class QPlayer(OptimalPlayer):
     def backprop(self, reward):
         for state, move in reversed(self.records):
             self.Q[state][move] += self.lr * (self.decay * reward - self.Q[state][move])
-            reward = max(max(self.Q[state].values()),0)
+            reward = max(self.Q[state].values())
 
     def act(self, grid): # rewrite act
         # whether move in random or not

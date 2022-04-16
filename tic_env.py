@@ -339,3 +339,89 @@ class OptimalPlayer:
 
         # random move
         return self.randomMove(grid)
+
+from collections import defaultdict
+class QPlayer(OptimalPlayer):
+    def __init__(self, epsilon=0.2, player='X', Q=defaultdict(lambda: defaultdict(int)), lr=0.05, decay=0.99):
+        super(QPlayer, self).__init__(epsilon=epsilon, player=player)
+        self.Q = Q  # Q function. 
+        self.records = [] # history of (state, action) record
+        self.lr = lr # learning rate
+        self.decay = decay # decaying factor
+
+    def toState(self, grid):
+        "Convert a grid to a state in tuple format as key"
+        return tuple([int(x) for x in np.ravel(grid)])
+    
+    def reset(self):
+        self.records = []
+
+    def add(self, grid, move):
+        self.records.append((self.toState(grid), move))
+    
+    def backprop(self, reward):
+        for state, move in reversed(self.records):
+            self.Q[state][move] += self.lr * (self.decay * reward - self.Q[state][move])
+            reward = max(max(self.Q[state].values()),0)
+
+    def act(self, grid): # rewrite act
+        # whether move in random or not
+        if random.random() < self.epsilon:
+            return self.randomMove(grid)
+        best_move = []
+        best_move_value = -np.Inf
+        moves = self.empty(grid) # possible moves
+        current_state = self.toState(grid)
+        for move in moves:
+            Q_s_a = self.Q[current_state][move]
+            if Q_s_a == best_move_value:
+                best_move.append(move)
+            elif Q_s_a > best_move_value:
+                best_move = [move]
+                best_move_value = Q_s_a
+        best_move = random.choice(best_move)
+        return best_move
+
+class QlearningEnv(TictactoeEnv):
+    def __init__(self, player1: QPlayer, player2: QPlayer):
+        super(QlearningEnv, self).__init__()
+        self.player1 = player1 # player X
+        self.player2 = player2 # player O
+    
+    def backprop(self):
+        # backpropagate reward
+        if self.winner == 'X':
+            self.player1.backprop(1)
+            self.player2.backprop(-1)
+        elif self.winner == 'O':
+            self.player1.backprop(-1)
+            self.player2.backprop(1)
+        else:
+            self.player1.backprop(0)
+            self.player2.backprop(0)
+
+    def reset_all(self):
+        self.reset()
+        self.player1.reset()
+        self.player2.reset()
+    
+    def train(self, epoch=1000):
+        for i in range(epoch):
+            while True:
+                p1_action = self.player1.act(self.grid)
+                self.player1.add(self.grid, p1_action)
+                self.step(p1_action)
+                self.checkEnd()
+                if self.end: # end after player 1's move
+                    self.backprop()
+                    self.reset_all()
+                    break
+                else:
+                    p2_action = self.player2.act(self.grid)
+                    self.player2.add(self.grid, p2_action)
+                    self.step(p2_action)
+                    self.checkEnd()
+                    if self.end: # end after player 2's move
+                        self.backprop()
+                        self.reset_all()
+                        break

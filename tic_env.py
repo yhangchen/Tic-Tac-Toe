@@ -339,6 +339,31 @@ class OptimalPlayer:
 
         # random move
         return self.randomMove(grid)
+    
+    def toState(self, grid):
+        "Convert a grid to a state in tuple format as key"
+        return tuple([int(x) for x in np.ravel(grid)])
+
+    # we add the following empty method to accomodate QPlayer
+
+    def add(self, grid, move):
+        pass
+
+    def backprop(self, reward):
+        pass
+
+    def reset(self):
+        pass
+
+    def decay_eps(self, epoch, epoch_star=1):
+        pass
+
+    def train(self):
+        pass
+
+    def eval(self):
+        pass
+
 
 from collections import defaultdict
 class QPlayer(OptimalPlayer):
@@ -348,14 +373,19 @@ class QPlayer(OptimalPlayer):
         self.records = [] # history of (state, action) record
         self.lr = lr # learning rate
         self.decay = decay # decaying factor
+        self.eps_min = 0.1
+        self.eps_max = 0.8
+        self.training = True
 
-    def toState(self, grid):
-        "Convert a grid to a state in tuple format as key"
-        return tuple([int(x) for x in np.ravel(grid)])
-    
     def reset(self):
         self.records = []
-
+    
+    def train(self): # train mode
+        self.training = True
+    
+    def eval(self): # eval/test mode
+        self.training = False
+    
     def add(self, grid, move):
         self.records.append((self.toState(grid), move))
     
@@ -363,10 +393,13 @@ class QPlayer(OptimalPlayer):
         for state, move in reversed(self.records):
             self.Q[state][move] += self.lr * (self.decay * reward - self.Q[state][move])
             reward = max(self.Q[state].values())
+    
+    def decay_eps(self, epoch, epoch_star=1):
+        self.epsilon = max(self.eps_min, self.eps_max*(1-epoch/epoch_star))
 
     def act(self, grid): # rewrite act
         # whether move in random or not
-        if random.random() < self.epsilon:
+        if self.training and random.random() < self.epsilon:
             return self.randomMove(grid)
         best_move = []
         best_move_value = -np.Inf
@@ -383,13 +416,18 @@ class QPlayer(OptimalPlayer):
         return best_move
 
 class QlearningEnv(TictactoeEnv):
-    def __init__(self, player1: QPlayer, player2: QPlayer):
+    def __init__(self, player1: OptimalPlayer, player2: OptimalPlayer):
         super(QlearningEnv, self).__init__()
-        self.player1 = player1 # player X
-        self.player2 = player2 # player O
+        self.player1 = player1 # player X at the first game, not necessarily for the rest
+        self.player2 = player2 # player O at the first round, not necessarily for the rest
+        self.training_reward_list = defaultdict(list) # see record_reward(self)
+        self.test_reward_list = defaultdict(list) # see record_reward(self)
+        self.test_avg_reward = defaultdict(list)
+        self.decay_eps = False # whether decay epsilon
+        self.testing = False 
     
     def backprop(self):
-        # backpropagate reward
+        # backpropagate reward to update Q. 
         if self.winner == 'X':
             self.player1.backprop(1)
             self.player2.backprop(-1)
@@ -401,27 +439,139 @@ class QlearningEnv(TictactoeEnv):
             self.player2.backprop(0)
 
     def reset_all(self):
+        # reset env by clearing game board and empty player's history
+        # but do not modify player's Q function.
         self.reset()
         self.player1.reset()
         self.player2.reset()
+
+    def set_decay_eps(self, epoch_star=1):
+        # enable decaying epsilon
+        self.decay_eps = True
+        self.epoch_star = epoch_star # n* in the paper
     
-    def train(self, epoch=1000):
-        for i in range(epoch):
+    def set_testing(self, test_per_epoch=250):
+        # enable test every test_per_epoch
+        self.testing = True
+        self.test_per_epoch = test_per_epoch
+
+    def record_reward(self, training=True):
+        # we alwys record reward for player 'X' at self.training_reward_list['X']
+        # and record for player 'O' at self.training_reward_list['O'].
+        #  No matter which player we are training. 
+        # Similarly for self.test_reward_list
+        if training:
+            reward_list = self.training_reward_list
+        else:
+            reward_list = self.test_reward_list
+        if self.winner == 'X':
+            reward_list['X'].append(1)
+            reward_list['O'].append(-1)
+        elif self.winner == 'O':
+            reward_list['X'].append(-1)
+            reward_list['O'].append(1)
+        else:
+            reward_list['X'].append(0)
+            reward_list['O'].append(0)
+    
+    def train(self, epochs=1000):
+        for epoch in range(epochs):
+            # switch the 1st player after every game
+            if epoch % 2 == 0:
+                player1 = self.player1
+                player2 = self.player2
+            else:
+                player1 = self.player2
+                player2 = self.player1
+            player1.train()
+            player2.train()
+            self.reset_all()
+            if self.decay_eps: # decay eps every epoch if self.decay_eps
+                player1.decay_eps(epoch, self.epoch_star)
+                player2.decay_eps(epoch, self.epoch_star)
             while True:
-                p1_action = self.player1.act(self.grid)
-                self.player1.add(self.grid, p1_action)
+                p1_action = player1.act(self.grid)
+                player1.add(self.grid, p1_action)
                 self.step(p1_action)
                 self.checkEnd()
-                if self.end: # end after player 1's move
+                if self.end: # end after first player's move
                     self.backprop()
+                    self.record_reward()
                     self.reset_all()
                     break
                 else:
-                    p2_action = self.player2.act(self.grid)
-                    self.player2.add(self.grid, p2_action)
+                    p2_action = player2.act(self.grid)
+                    player2.add(self.grid, p2_action)
                     self.step(p2_action)
                     self.checkEnd()
-                    if self.end: # end after player 2's move
+                    if self.end: # end after second player's move
                         self.backprop()
+                        self.record_reward()
                         self.reset_all()
                         break
+            if self.testing and (epoch+1) % self.test_per_epoch == 0:
+                self.test_avg_reward['random'].append(self.test(self.player1, 'random'))
+                self.test_avg_reward['optimal'].append(self.test(self.player1, 'optimal'))
+            self.switch()
+
+
+    def test(self, player: OptimalPlayer, target_player_type, epochs=500):
+        self.test_reward_list = defaultdict(list)
+        if player.player == 'X':
+            if target_player_type == 'random':
+                target_player = OptimalPlayer(epsilon=1.0, player='O')
+            elif target_player_type == 'optimal':
+                target_player = OptimalPlayer(epsilon=0.0, player='O')
+            else:
+                raise NotImplementedError
+            for epoch in range(epochs):
+                player.eval()
+                target_player.eval()
+                self.reset_all()
+                while True:
+                    p1_action = player.act(self.grid)
+                    self.step(p1_action)
+                    self.checkEnd()
+                    if self.end: # end after player 1's move
+                        self.record_reward(training=False)
+                        self.reset_all()
+                        break
+                    else:
+                        p2_action = target_player.act(self.grid)
+                        self.step(p2_action)
+                        self.checkEnd()
+                        if self.end: # end after player 2's move
+                            self.record_reward(training=False)
+                            self.reset_all()
+                            break
+            return sum(self.test_reward_list['X']) / epochs
+
+        elif player.player == 'O':
+            if target_player_type == 'random':
+                target_player = OptimalPlayer(epsilon=1.0, player='X')
+            elif target_player_type == 'optimal':
+                target_player = OptimalPlayer(epsilon=0.0, player='X')
+            else:
+                raise NotImplementedError
+            for epoch in range(epochs):
+                player.eval()
+                target_player.eval()
+                self.reset_all()
+                while True:
+                    p1_action = target_player.act(self.grid)
+                    self.step(p1_action)
+                    self.checkEnd()
+                    if self.end: # end after player 1's move
+                        self.record_reward(training=False)
+                        self.reset_all()
+                        break
+                    else:
+                        p2_action = player.act(self.grid)
+                        self.step(p2_action)
+                        self.checkEnd()
+                        if self.end: # end after player 2's move
+                            self.record_reward(training=False)
+                            self.reset_all()
+                            break
+
+            return sum(self.test_reward_list['O']) / epochs

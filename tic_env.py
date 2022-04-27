@@ -1,7 +1,7 @@
 # import gym
 import numpy as np
 import random
-
+from copy import deepcopy
 
 class TictactoeEnv:
     '''
@@ -401,6 +401,11 @@ class QPlayer(OptimalPlayer):
         # whether move in random or not
         if self.training and random.random() < self.epsilon:
             return self.randomMove(grid)
+        if self.player=='X':
+            assert sum(sum(grid)) <= 0
+        else:
+            assert sum(sum(grid)) > 0
+
         best_move = []
         best_move_value = -np.Inf
         moves = self.empty(grid) # possible moves
@@ -418,8 +423,8 @@ class QPlayer(OptimalPlayer):
 class QlearningEnv(TictactoeEnv):
     def __init__(self, player1: OptimalPlayer, player2: OptimalPlayer):
         super(QlearningEnv, self).__init__()
-        self.player1 = player1 # player X at the first game, not necessarily for the rest
-        self.player2 = player2 # player O at the first round, not necessarily for the rest
+        self.player1 = player1 # player X at the each game
+        self.player2 = player2 # player O at the each game
         self.training_reward_list = defaultdict(list) # see record_reward(self)
         self.test_reward_list = defaultdict(list) # see record_reward(self)
         self.test_avg_reward = defaultdict(list)
@@ -450,10 +455,12 @@ class QlearningEnv(TictactoeEnv):
         self.decay_eps = True
         self.epoch_star = epoch_star # n* in the paper
     
-    def set_testing(self, test_per_epoch=250):
+    def set_testing(self, test_eps=0, test_per_epoch=250):
         # enable test every test_per_epoch
         self.testing = True
         self.test_per_epoch = test_per_epoch
+        self.test_player = None
+        self.test_eps = test_eps
 
     def record_reward(self, training=True):
         # we alwys record reward for player 'X' at self.training_reward_list['X']
@@ -474,24 +481,42 @@ class QlearningEnv(TictactoeEnv):
             reward_list['X'].append(0)
             reward_list['O'].append(0)
     
+    def get_reward(self, player=1, training=True):
+        # player=1 if we want to get reward from the 1st player while input
+        # player=2 if 2nd
+        def connect_lst(list1, list2):
+            result = [None]*(len(list1)+len(list2))
+            result[::2] = list1
+            result[1::2] = list2
+            return result
+
+        if training:
+            reward_list = self.training_reward_list
+        else:
+            reward_list = self.test_reward_list
+
+        if player==1:
+            return connect_lst(reward_list['X'][0::2], reward_list['O'][1::2])
+        elif player==2:
+            return connect_lst(reward_list['O'][0::2], reward_list['X'][1::2])
+        else:
+            raise NotImplementedError
+
+        
+    
     def train(self, epochs=1000):
         for epoch in range(epochs):
-            # switch the 1st player after every game
-            if epoch % 2 == 0:
-                player1 = self.player1
-                player2 = self.player2
-            else:
-                player1 = self.player2
-                player2 = self.player1
-            player1.train()
-            player2.train()
+            self.player1.player = 'X'
+            self.player2.player = 'O'
+            self.player1.train()
+            self.player2.train()
             self.reset_all()
             if self.decay_eps: # decay eps every epoch if self.decay_eps
-                player1.decay_eps(epoch, self.epoch_star)
-                player2.decay_eps(epoch, self.epoch_star)
+                self.player1.decay_eps(epoch, self.epoch_star)
+                self.player2.decay_eps(epoch, self.epoch_star)
             while True:
-                p1_action = player1.act(self.grid)
-                player1.add(self.grid, p1_action)
+                p1_action = self.player1.act(self.grid)
+                self.player1.add(self.grid, p1_action)
                 self.step(p1_action)
                 self.checkEnd()
                 if self.end: # end after first player's move
@@ -500,8 +525,8 @@ class QlearningEnv(TictactoeEnv):
                     self.reset_all()
                     break
                 else:
-                    p2_action = player2.act(self.grid)
-                    player2.add(self.grid, p2_action)
+                    p2_action = self.player2.act(self.grid)
+                    self.player2.add(self.grid, p2_action)
                     self.step(p2_action)
                     self.checkEnd()
                     if self.end: # end after second player's move
@@ -510,68 +535,57 @@ class QlearningEnv(TictactoeEnv):
                         self.reset_all()
                         break
             if self.testing and (epoch+1) % self.test_per_epoch == 0:
-                self.test_avg_reward['random'].append(self.test(self.player1, 'random'))
-                self.test_avg_reward['optimal'].append(self.test(self.player1, 'optimal'))
-            self.switch()
+                if epoch % 2==0:
+                    self.test_player = deepcopy(self.player1)
+                else:
+                    self.test_player = deepcopy(self.player2)
+                self.test_player.player = 'X' # we always set the test player as 'X'
+                self.test_player.epsilon = self.test_eps
+                self.test_player.reset()
+                self.test_avg_reward['random'].append(self.test(self.test_player, 'random'))
+                self.test_avg_reward['optimal'].append(self.test(self.test_player, 'optimal'))
+            # switch the 1st player after every game
+            self.player1, self.player2 = self.player2, self.player1
+        self.player1.player = 'X'
+        self.player2.player = 'O'
 
 
-    def test(self, player: OptimalPlayer, target_player_type, epochs=500):
+
+    def test(self, player: OptimalPlayer, target_player_type: str, epochs=500):
         self.test_reward_list = defaultdict(list)
-        if player.player == 'X':
-            if target_player_type == 'random':
-                target_player = OptimalPlayer(epsilon=1.0, player='O')
-            elif target_player_type == 'optimal':
-                target_player = OptimalPlayer(epsilon=0.0, player='O')
+        if target_player_type == 'random':
+            target_player = OptimalPlayer(epsilon=1.0, player='O')
+        elif target_player_type == 'optimal':
+            target_player = OptimalPlayer(epsilon=0.0, player='O')
+        else:
+            raise NotImplementedError
+
+        for epoch in range(epochs):
+            if epoch % 2 == 0:
+                player1 = player
+                player2 = target_player
             else:
-                raise NotImplementedError
-            for epoch in range(epochs):
-                player.eval()
-                target_player.eval()
-                self.reset_all()
-                while True:
-                    p1_action = player.act(self.grid)
-                    self.step(p1_action)
+                player1 = target_player
+                player2 = player
+            player1.player = 'X'
+            player2.player = 'O'
+            player1.eval()
+            player2.eval()
+            self.reset_all()
+            while True:
+                p1_action = player1.act(self.grid)
+                self.step(p1_action)
+                self.checkEnd()
+                if self.end: # end after player 1's move
+                    self.record_reward(training=False)
+                    self.reset_all()
+                    break
+                else:
+                    p2_action = player2.act(self.grid)
+                    self.step(p2_action)
                     self.checkEnd()
-                    if self.end: # end after player 1's move
+                    if self.end: # end after player 2's move
                         self.record_reward(training=False)
                         self.reset_all()
                         break
-                    else:
-                        p2_action = target_player.act(self.grid)
-                        self.step(p2_action)
-                        self.checkEnd()
-                        if self.end: # end after player 2's move
-                            self.record_reward(training=False)
-                            self.reset_all()
-                            break
-            return sum(self.test_reward_list['X']) / epochs
-
-        elif player.player == 'O':
-            if target_player_type == 'random':
-                target_player = OptimalPlayer(epsilon=1.0, player='X')
-            elif target_player_type == 'optimal':
-                target_player = OptimalPlayer(epsilon=0.0, player='X')
-            else:
-                raise NotImplementedError
-            for epoch in range(epochs):
-                player.eval()
-                target_player.eval()
-                self.reset_all()
-                while True:
-                    p1_action = target_player.act(self.grid)
-                    self.step(p1_action)
-                    self.checkEnd()
-                    if self.end: # end after player 1's move
-                        self.record_reward(training=False)
-                        self.reset_all()
-                        break
-                    else:
-                        p2_action = player.act(self.grid)
-                        self.step(p2_action)
-                        self.checkEnd()
-                        if self.end: # end after player 2's move
-                            self.record_reward(training=False)
-                            self.reset_all()
-                            break
-
-            return sum(self.test_reward_list['O']) / epochs
+        return sum(self.get_reward(player=1, training=False))/epochs

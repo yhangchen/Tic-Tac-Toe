@@ -349,7 +349,7 @@ class OptimalPlayer:
     def add(self, grid, move):
         pass
 
-    def backprop(self, reward):
+    def backprop(self, reward, Q):
         pass
 
     def reset(self):
@@ -367,11 +367,8 @@ class OptimalPlayer:
 
 from collections import defaultdict
 class QPlayer(OptimalPlayer):
-    def __init__(self, epsilon=0.2, player='X', Q=None, lr=0.05, decay=0.99):
+    def __init__(self, epsilon=0.2, player='X', lr=0.05, decay=0.99):
         super(QPlayer, self).__init__(epsilon=epsilon, player=player)
-        if Q is None:
-            Q = defaultdict(lambda: defaultdict(int))
-        self.Q = Q  # Q function. 
         self.records = [] # history of (state, action) record
         self.lr = lr # learning rate
         self.decay = decay # decaying factor
@@ -391,15 +388,15 @@ class QPlayer(OptimalPlayer):
     def add(self, grid, move):
         self.records.append((self.toState(grid), move))
     
-    def backprop(self, reward):
+    def backprop(self, reward, Q):
         for state, move in reversed(self.records):
-            self.Q[state][move] += self.lr * (self.decay * reward - self.Q[state][move])
-            reward = max(self.Q[state].values())
+            Q[state][move] += self.lr * (self.decay * reward - Q[state][move])
+            reward = max(Q[state].values())
     
     def decay_eps(self, epoch, epoch_star=1):
         self.epsilon = max(self.eps_min, self.eps_max*(1-epoch/epoch_star))
 
-    def act(self, grid): # rewrite act
+    def act(self, grid, **kwargs): # rewrite act
         # whether move in random or not
         if self.training and random.random() < self.epsilon:
             return self.randomMove(grid)
@@ -407,13 +404,14 @@ class QPlayer(OptimalPlayer):
             assert sum(sum(grid)) <= 0
         else:
             assert sum(sum(grid)) > 0
-
+        
+        Q = kwargs['Q']
         best_move = []
         best_move_value = -np.Inf
         moves = self.empty(grid) # possible moves
         current_state = self.toState(grid)
         for move in moves:
-            Q_s_a = self.Q[current_state][move]
+            Q_s_a = Q[current_state][move]
             if Q_s_a == best_move_value:
                 best_move.append(move)
             elif Q_s_a > best_move_value:
@@ -423,7 +421,7 @@ class QPlayer(OptimalPlayer):
         return best_move
 
 class QlearningEnv(TictactoeEnv):
-    def __init__(self, player1: OptimalPlayer, player2: OptimalPlayer):
+    def __init__(self, player1: OptimalPlayer, player2: OptimalPlayer, Q=None):
         super(QlearningEnv, self).__init__()
         self.player1 = player1 # player X at the each game
         self.player2 = player2 # player O at the each game
@@ -432,18 +430,20 @@ class QlearningEnv(TictactoeEnv):
         self.test_avg_reward = defaultdict(list)
         self.decay_eps = False # whether decay epsilon
         self.testing = False 
-    
+        if Q is None:
+            Q = defaultdict(lambda: defaultdict(int))
+        self.Q = {'Q': Q}
     def backprop(self):
         # backpropagate reward to update Q. 
         if self.winner == 'X':
-            self.player1.backprop(1)
-            self.player2.backprop(-1)
+            self.player1.backprop(1, self.Q['Q'])
+            self.player2.backprop(-1, self.Q['Q'])
         elif self.winner == 'O':
-            self.player1.backprop(-1)
-            self.player2.backprop(1)
+            self.player1.backprop(-1, self.Q['Q'])
+            self.player2.backprop(1, self.Q['Q'])
         else:
-            self.player1.backprop(0)
-            self.player2.backprop(0)
+            self.player1.backprop(0, self.Q['Q'])
+            self.player2.backprop(0, self.Q['Q'])
 
     def reset_all(self):
         # reset env by clearing game board and empty player's history
@@ -518,7 +518,7 @@ class QlearningEnv(TictactoeEnv):
                 self.player1.decay_eps(epoch, self.epoch_star)
                 self.player2.decay_eps(epoch, self.epoch_star)
             while True:
-                p1_action = self.player1.act(self.grid)
+                p1_action = self.player1.act(self.grid, **self.Q)
                 self.player1.add(self.grid, p1_action)
                 self.step(p1_action)
                 self.checkEnd()
@@ -528,7 +528,7 @@ class QlearningEnv(TictactoeEnv):
                     self.reset_all()
                     break
                 else:
-                    p2_action = self.player2.act(self.grid)
+                    p2_action = self.player2.act(self.grid, **self.Q)
                     self.player2.add(self.grid, p2_action)
                     self.step(p2_action)
                     self.checkEnd()
@@ -578,7 +578,7 @@ class QlearningEnv(TictactoeEnv):
             player2.eval()
             self.reset_all()
             while True:
-                p1_action = player1.act(self.grid)
+                p1_action = player1.act(self.grid, **self.Q)
                 self.step(p1_action)
                 self.checkEnd()
                 if self.end: # end after player 1's move
@@ -586,7 +586,7 @@ class QlearningEnv(TictactoeEnv):
                     self.reset_all()
                     break
                 else:
-                    p2_action = player2.act(self.grid)
+                    p2_action = player2.act(self.grid, **self.Q)
                     self.step(p2_action)
                     self.checkEnd()
                     if self.end: # end after player 2's move

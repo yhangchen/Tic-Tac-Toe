@@ -367,8 +367,10 @@ class OptimalPlayer:
 
 from collections import defaultdict
 class QPlayer(OptimalPlayer):
-    def __init__(self, epsilon=0.2, player='X', Q=defaultdict(lambda: defaultdict(int)), lr=0.05, decay=0.99):
+    def __init__(self, epsilon=0.2, player='X', Q=None, lr=0.05, decay=0.99):
         super(QPlayer, self).__init__(epsilon=epsilon, player=player)
+        if Q is None:
+            Q = defaultdict(lambda: defaultdict(int))
         self.Q = Q  # Q function. 
         self.records = [] # history of (state, action) record
         self.lr = lr # learning rate
@@ -505,6 +507,7 @@ class QlearningEnv(TictactoeEnv):
         
     
     def train(self, epochs=1000):
+        assert epochs%2==0, 'use even number of games'
         for epoch in range(epochs):
             self.player1.player = 'X'
             self.player2.player = 'O'
@@ -542,8 +545,10 @@ class QlearningEnv(TictactoeEnv):
                 self.test_player.player = 'X' # we always set the test player as 'X'
                 self.test_player.epsilon = self.test_eps
                 self.test_player.reset()
-                self.test_avg_reward['random'].append(self.test(self.test_player, 'random'))
-                self.test_avg_reward['optimal'].append(self.test(self.test_player, 'optimal'))
+                assert(isinstance(self.test_player, QPlayer))
+                self.test_avg_reward['random'].append(self.test(deepcopy(self.test_player), 'random'))
+                self.test_avg_reward['optimal'].append(self.test(deepcopy(self.test_player), 'optimal'))
+
             # switch the 1st player after every game
             self.player1, self.player2 = self.player2, self.player1
         self.player1.player = 'X'

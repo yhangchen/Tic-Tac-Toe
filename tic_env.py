@@ -400,6 +400,7 @@ class QPlayer(OptimalPlayer):
         # whether move in random or not
         if self.training and random.random() < self.epsilon:
             return self.randomMove(grid)
+        # assert it is the player's turn
         if self.player=='X':
             assert sum(sum(grid)) <= 0
         else:
@@ -432,7 +433,7 @@ class QlearningEnv(TictactoeEnv):
         self.testing = False 
         if Q is None:
             Q = defaultdict(lambda: defaultdict(int))
-        self.Q = {'Q': Q}
+        self.Q = {'Q': Q} # we use a dict here to match act method in OptimalPlayer.
     def backprop(self):
         # backpropagate reward to update Q. 
         if self.winner == 'X':
@@ -486,6 +487,8 @@ class QlearningEnv(TictactoeEnv):
     def get_reward(self, player=1, training=True):
         # player=1 if we want to get reward from the 1st player while input
         # player=2 if 2nd
+        # since we switch the player after each game, the 1st player will get all odd position 
+        # from ['X'] and even position from ['O']. 
         def connect_lst(list1, list2):
             result = [None]*(len(list1)+len(list2))
             result[::2] = list1
@@ -509,9 +512,9 @@ class QlearningEnv(TictactoeEnv):
     def train(self, epochs=1000):
         assert epochs%2==0, 'use even number of games'
         for epoch in range(epochs):
-            self.player1.player = 'X'
-            self.player2.player = 'O'
-            self.player1.train()
+            self.player1.player = 'X' # always let player1 be the first player
+            self.player2.player = 'O' # always let player2 be the second player
+            self.player1.train() # train mode, update Q.
             self.player2.train()
             self.reset_all()
             if self.decay_eps: # decay eps every epoch if self.decay_eps
@@ -523,9 +526,9 @@ class QlearningEnv(TictactoeEnv):
                 self.step(p1_action)
                 self.checkEnd()
                 if self.end: # end after first player's move
-                    self.backprop()
-                    self.record_reward()
-                    self.reset_all()
+                    self.backprop() # yodate Q values for both players.
+                    self.record_reward() # record reward for this game
+                    self.reset_all() # reset env board and clear player's history (for update Q).
                     break
                 else:
                     p2_action = self.player2.act(self.grid, **self.Q)
@@ -574,7 +577,7 @@ class QlearningEnv(TictactoeEnv):
                 player2 = player
             player1.player = 'X'
             player2.player = 'O'
-            player1.eval()
+            player1.eval() # eval mode, do not update Q
             player2.eval()
             self.reset_all()
             while True:
@@ -593,4 +596,4 @@ class QlearningEnv(TictactoeEnv):
                         self.record_reward(training=False)
                         self.reset_all()
                         break
-        return sum(self.get_reward(player=1, training=False))/epochs
+        return sum(self.get_reward(player=1, training=False))/epochs # win +1, loss -1

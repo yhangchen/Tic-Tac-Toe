@@ -597,3 +597,146 @@ class QlearningEnv(TictactoeEnv):
                         self.reset_all()
                         break
         return sum(self.get_reward(player=1, training=False))/epochs # win +1, loss -1
+
+# Second Part
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+N_STATES = 18
+N_ACTIONS = 9
+MEMORY_CAPACITY = 10000
+TARGET_REPLACE_ITER = 500
+BATCH_SIZE = 64
+class Net(nn.Module):
+    def __init__(self, ):
+        super(Net, self).__init__()
+        self.layer1 = nn.Linear(N_STATES, 128)
+        self.layer1.weight.data.normal_(0, 0.1)
+        self.layer2 = nn.Linear(128, 128)
+        self.layer2.weight.data.normal_(0, 0.1)
+        self.out = nn.Linear(128, N_ACTIONS)
+        self.out.weight.data.normal_(0, 0.1)
+
+    def forward(self, x):
+        x = self.layer1(x)
+        x = F.relu(x)
+        x = self.layer2(x)
+        x = F.relu(x)
+        x = self.out(x)
+        # x = F.softmax(x, dim=1)
+        return x
+
+
+class DQN(object):
+    def __init__(self, epsilon=0.2, player='X', lr=5e-4, decay=0.99):
+        self.eval_net, self.target_net = Net(), Net()
+        self.epsilon = epsilon
+        self.lr = lr
+        self.decay = decay
+        self.player = player
+
+        self.learn_step_counter = 0                                     # for target updating
+        self.memory_counter = 0                                         # for storing memory
+        self.memory = torch.zeros((MEMORY_CAPACITY, N_STATES*2 + 2))     # initialize memory
+        self.optimizer = torch.optim.Adam(self.eval_net.parameters(), lr=lr)
+        self.loss_func = nn.SmoothL1Loss()
+        self.loss_250 = 0
+        self.loss = []
+        self.training = True
+
+    def train(self): # train mode
+        self.training = True
+    
+    def act(self, grid, **kwargs):
+        '''
+        grid : grid tensor with shape 3x3
+        player : to indicate player is 'X' or 'O'
+        '''
+        player = kwargs['player']
+        # Change grid to state tensor
+        grid_mine = whose_grid(grid, player)
+        grid_opp = whose_grid(grid, player)
+        x = torch.stack((grid_mine, grid_opp), axis=0)
+
+        # x : [1,18]
+        x = x.view(1, -1)
+        # input only one sample
+        if np.random.uniform() > self.epsilon:   # greedy
+            actions_value = self.eval_net.forward(x)
+            # print("actions_value")
+            # print(actions_value)
+            action = int(actions_value.argmax())
+        else:   # random
+            action = np.random.randint(0, N_ACTIONS)
+        assert action < 9 and action >-1
+        return action
+
+    def store_transition(self, s, a, r, s_):
+        '''
+        s : The state of this round
+        a : The action taken of this round
+        r : The reward got of this round
+        s_ : The state of next round
+        '''
+        # s and s_ shape [1, 18]
+        s = s.view(1, -1)
+        s_ = s_.view(1, -1)
+        # a_r shape [1,2]
+        a_r = torch.Tensor([a, r]).view(1, -1)
+        #transition shape [1, 36]
+        transition = torch.hstack((s, a_r, s_))
+        # replace the old memory with new memory
+        index = self.memory_counter % MEMORY_CAPACITY
+        self.memory[index, :] = transition
+        self.memory_counter += 1
+
+    def learn(self):
+        if self.memory_counter > MEMORY_CAPACITY:
+            # target parameter update
+            if self.learn_step_counter % TARGET_REPLACE_ITER == 0:
+                self.target_net.load_state_dict(self.eval_net.state_dict())
+            self.learn_step_counter += 1
+
+            # sample batch transitions
+            sample_index = np.random.choice(MEMORY_CAPACITY, BATCH_SIZE)
+            b_memory = self.memory[sample_index, :]
+            # print("mm")
+            # print(self.memory[-1,:])
+            b_s = torch.Tensor(b_memory[:, :N_STATES])
+            b_a = torch.LongTensor(b_memory[:, N_STATES:N_STATES+1].long())
+            b_r = torch.Tensor(b_memory[:, N_STATES+1:N_STATES+2])
+            b_s_ = torch.Tensor(b_memory[:, -N_STATES:])
+            #b_s_ shape: [64, 18]
+
+            # q_eval w.r.t the action in experience
+            q_eval = self.eval_net(b_s).gather(1, b_a)  # shape (batch, 1)
+            q_next = self.target_net(b_s_).detach()     # detach from graph, don't backpropagate
+
+            q_target = torch.zeros(b_r.shape)
+            max_q = self.decay * q_next.max(1)[0].view(BATCH_SIZE, 1)
+            for i in range(b_r.shape[0]):
+                for j in range(b_r.shape[1]):
+                    # whether terminal state
+                    if b_r[i][j] == 1 or b_r[i][j] == -1:
+                        q_target[i][j] = b_r[i][j]
+                    else:
+                        q_target[i][j] = b_r[i][j] + max_q[i][j] 
+            # print("br")
+            # print(b_r.shape)
+            # q_target = b_r + GAMMA * q_next.max(1)[0].view(BATCH_SIZE, 1)   # shape (batch, 1)
+            loss = self.loss_func(q_eval, q_target)
+
+            # Calculate reward and training loss
+            if self.memory_counter % 250 == 0:
+                self.loss.append(self.loss_250 / 250.)
+                self.loss_250 = 0
+            else:
+                self.loss_250 += loss.item()
+            
+        
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+        else:
+            pass

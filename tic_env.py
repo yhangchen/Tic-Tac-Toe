@@ -696,8 +696,13 @@ class DQN(object):
         '''
         player = kwargs['player']
         # Change grid to state tensor
+        if player == 'X':
+            opp = 'O'
+        else:
+            opp = 'X'
+
         grid_mine = whose_grid(grid, player)
-        grid_opp = whose_grid(grid, player)
+        grid_opp = whose_grid(grid, opp)
         x = torch.stack((grid_mine, grid_opp), axis=0)
 
         # x : [1,18]
@@ -903,9 +908,18 @@ class DQlearningEnv(TictactoeEnv):
             opp = 'O'
         else:
             opp = 'X'
+
         grid_mine = whose_grid(grid, player)
         grid_opp = whose_grid(grid, opp)
-        x = torch.stack((grid_mine, grid_opp), axis=0)
+
+        if player == self.player1.player and isinstance(self.player1, DQN):
+            x = torch.stack((grid_mine, grid_opp), axis=0)
+        elif player == self.player2.player and isinstance(self.player2, DQN):
+            x = torch.stack((grid_mine, grid_opp), axis=0)
+        else:
+            x = torch.stack((grid_opp, grid_mine), axis=0)
+
+        
         return x
 
     def action_available(self, grid, action):

@@ -1,4 +1,5 @@
 # import gym
+from matplotlib.style import available
 import numpy as np
 import random
 from copy import deepcopy
@@ -641,9 +642,6 @@ def a_to_pos(a):
         return (2, a-6)
 
 
-
-
-
 N_STATES = 18
 N_ACTIONS = 9
 MEMORY_CAPACITY = 10000
@@ -689,6 +687,22 @@ class DQN(object):
     def train(self): # train mode
         self.training = True
     
+    def eval(self): # eval/test mode
+        self.training = False
+
+    def randomMove(self, grid):
+        '''
+        grid : 3 x 3
+        return : int
+        '''
+        available_move = []
+        for i in range(grid.shape[0]):
+            for j in range(grid.shape[1]):
+                if grid[i][j] == 0:
+                    available_move.append(3*i+j)
+        return available_move
+
+
     def act(self, grid, **kwargs):
         '''
         grid : grid tensor with shape 3x3
@@ -708,13 +722,15 @@ class DQN(object):
         # x : [1,18]
         x = x.view(1, -1)
         # input only one sample
-        if np.random.uniform() > self.epsilon:   # greedy
+        if np.random.uniform() > self.epsilon and self.memory_counter > MEMORY_CAPACITY:   # greedy
             actions_value = self.eval_net.forward(x)
             # print("actions_value")
             # print(actions_value)
             action = int(actions_value.argmax())
         else:   # random
-            action = np.random.randint(0, N_ACTIONS)
+            avail_move = self.randomMove(grid)
+            action = random.choice(avail_move)
+            # action = np.random.randint(0, N_ACTIONS)
         assert action < 9 and action >-1
         return action
 
@@ -765,6 +781,7 @@ class DQN(object):
 
             q_target = torch.zeros(b_r.shape)
             max_q = self.decay * q_next.max(1)[0].view(BATCH_SIZE, 1)
+
             for i in range(b_s_terminal.shape[0]):
                 for j in range(b_s_terminal.shape[1]):
                     # whether terminal state
@@ -774,7 +791,7 @@ class DQN(object):
                         q_target[i][j] = b_r[i][j] + max_q[i][j] 
             # print("br")
             # print(b_r.shape)
-            # q_target = b_r + GAMMA * q_next.max(1)[0].view(BATCH_SIZE, 1)   # shape (batch, 1)
+            # q_target = b_r +  max_q   # shape (batch, 1)
             loss = self.loss_func(q_eval, q_target)
 
             # Calculate reward and training loss
@@ -803,7 +820,7 @@ class DQlearningEnv(TictactoeEnv):
         self.test_avg_reward = defaultdict(list)
         self.decay_eps = False # whether decay epsilon
         self.testing = False 
-        self.s_terminal = torch.ones((2,3,3))
+        self.s_terminal = torch.zeros((2,3,3))
         self.loss = 0
 
         self.dict_p1 = {'player' : self.player1.player} 
@@ -812,17 +829,6 @@ class DQlearningEnv(TictactoeEnv):
         #     Q = defaultdict(lambda: defaultdict(int))
         # self.Q = {'Q': Q} # we use a dict here to match act method in OptimalPlayer.
     def backprop(self):
-        # backpropagate reward to update Q. 
-        # if self.winner == 'X':
-        #     self.player1.learn()
-        #     self.player2.learn()
-        # elif self.winner == 'O':
-        #     self.player1.learn()
-        #     self.player2.learn()
-        #     pass
-        # else:
-        #     self.player1.learn()
-        #     self.player2.learn()
         self.player1.learn()
         self.player2.learn()
 
@@ -919,6 +925,7 @@ class DQlearningEnv(TictactoeEnv):
         else:
             x = torch.stack((grid_opp, grid_mine), axis=0)
 
+        # x = torch.stack((grid_mine, grid_opp), axis=0)
         
         return x
 
@@ -956,11 +963,12 @@ class DQlearningEnv(TictactoeEnv):
                 if self.action_available(self.grid, p1_action):
                     next_grid, _, _ = self.step(p1_action)
                     s_next = self.grid_to_state(next_grid, self.player1.player)
+                    self.checkEnd()
                     r1 = self.reward(self.player1.player)
                     if isinstance(p1_action, tuple):
                         pos_x, pos_y = p1_action
                         p1_action = pos_x * 3 + pos_y
-                    self.checkEnd()
+                    
                     if self.end:
                         self.player1.store_transition(s_t, p1_action, r1, s_next, 1)
                     else:
@@ -970,10 +978,12 @@ class DQlearningEnv(TictactoeEnv):
                     r1 = -1
                     self.end = True
                     self.winner = self.player2.player
-                    self.player1.store_transition(s_t, p1_action, r1, self.s_terminal, 1)
-
+                    self.player1.store_transition(s_t, p1_action, r1, self.s_terminal, 1) # self.s_terminal
+                
+                self.backprop()
+                self.checkEnd()
                 if self.end: # end after first player's move
-                    self.backprop() # update Q values for both players.
+                    # self.backprop() # update Q values for both players.
                     self.record_reward() # record reward for this game
                     self.reset_all() # reset env board and clear player's history (for update Q).
                     break
@@ -983,11 +993,11 @@ class DQlearningEnv(TictactoeEnv):
                     if self.action_available(self.grid, p2_action):
                         next_grid, _, _ = self.step(p2_action)
                         s_next = self.grid_to_state(next_grid, self.player2.player)
+                        self.checkEnd()
                         r2 = self.reward(self.player2.player)
                         if isinstance(p2_action, tuple):
                             pos_x, pos_y = p2_action
                             p2_action = pos_x * 3 + pos_y
-                        self.checkEnd()
                         if self.end:
                             self.player2.store_transition(s_t, p2_action, r2, s_next, 1)
                         else:
@@ -998,7 +1008,9 @@ class DQlearningEnv(TictactoeEnv):
                         self.end = True
                         self.winner = self.player1.player
                         self.player2.store_transition(s_t, p2_action, r2, self.s_terminal, 1)
-
+                    
+                    self.backprop()
+                    self.checkEnd()
                     if self.end: # end after second player's move
                         self.backprop()
                         self.record_reward()
@@ -1026,7 +1038,7 @@ class DQlearningEnv(TictactoeEnv):
 
 
 
-    def test(self, player: OptimalPlayer, target_player_type: str, epochs=500):
+    def test(self, player: DQN, target_player_type: str, epochs=500):
         self.test_reward_list = defaultdict(list)
         if target_player_type == 'random':
             target_player = OptimalPlayer(epsilon=1.0, player='O')

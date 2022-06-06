@@ -350,7 +350,7 @@ class OptimalPlayer:
     def add(self, grid, move):
         pass
     
-    def store_transition(self, s_t, move, r, s_next, s_terminal):
+    def store_transition(self, state, action, next_state, reward):
         pass
 
     def backprop(self, reward, Q):
@@ -369,6 +369,9 @@ class OptimalPlayer:
         pass
 
     def eval(self):
+        pass
+
+    def update_target(self):
         pass
 
 
@@ -609,26 +612,7 @@ class QlearningEnv(TictactoeEnv):
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-def whose_grid(g, player):
-    '''
-    g is a grid matrix of 3 x 3
-    player : X for me, O for oppenent
-    '''
-    if player == 'X':
-        color = 1
-    else:
-        color = -1
-
-    res = torch.zeros(g.shape)
-    for x in range(g.shape[0]):
-        for y in range(g.shape[1]):
-            if g[x][y] == color:
-                res[x][y] = color
-            else:
-                res[x][y] = 0
-
-    return res
+from collections import namedtuple, deque
 
 def a_to_pos(a):
     '''
@@ -641,21 +625,39 @@ def a_to_pos(a):
     else:
         return (2, a-6)
 
+def pos_to_a(pos):
+    return pos[0]*3+pos[1]
+
+
+def grid2state(grid, player):
+    if player == 'X':
+        color = 1
+    else:
+        color = -1
+
+    res = torch.zeros((grid.shape[0], grid.shape[1], 2))
+    for x in range(grid.shape[0]):
+        for y in range(grid.shape[1]):
+            if grid[x][y] == color:
+                res[(x,y,0)] = 1
+            elif grid[x][y] == -color:
+                res[(x,y,1)] = 1
+
+    return res.view(1,-1)
+
 
 N_STATES = 18
 N_ACTIONS = 9
 MEMORY_CAPACITY = 10000
 TARGET_REPLACE_ITER = 500
 BATCH_SIZE = 64
-class Net(nn.Module):
-    def __init__(self, ):
-        super(Net, self).__init__()
+
+class DQNNet(nn.Module):
+    def __init__(self):
+        super(DQNNet, self).__init__()
         self.layer1 = nn.Linear(N_STATES, 128)
-        self.layer1.weight.data.normal_(0, 0.1)
         self.layer2 = nn.Linear(128, 128)
-        self.layer2.weight.data.normal_(0, 0.1)
         self.out = nn.Linear(128, N_ACTIONS)
-        self.out.weight.data.normal_(0, 0.1)
 
     def forward(self, x):
         x = self.layer1(x)
@@ -663,289 +665,142 @@ class Net(nn.Module):
         x = self.layer2(x)
         x = F.relu(x)
         x = self.out(x)
-        # x = F.softmax(x, dim=1)
         return x
 
+Transition = namedtuple('Transition',
+                        ('state', 'action', 'next_state', 'reward'))
 
-class DQN(object):
+class ReplayMemory(object):
+
+    def __init__(self, capacity):
+        self.memory = deque([],maxlen=capacity)
+
+    def push(self, *args):
+        """Save a transition"""
+        self.memory.append(Transition(*args))
+
+    def sample(self, batch_size):
+        return random.sample(self.memory, batch_size)
+
+    def __len__(self):
+        return len(self.memory)
+
+
+from collections import defaultdict
+class DQNPlayer(OptimalPlayer):
     def __init__(self, epsilon=0.2, player='X', lr=5e-4, decay=0.99):
-        self.eval_net, self.target_net = Net(), Net()
-        self.epsilon = epsilon
-        self.lr = lr
-        self.decay = decay
-        self.player = player
-
-        self.learn_step_counter = 0                                     # for target updating
-        self.memory_counter = 0                                         # for storing memory
-        self.memory = torch.zeros((MEMORY_CAPACITY, N_STATES*2 + 3))     # initialize memory
-        self.optimizer = torch.optim.Adam(self.eval_net.parameters(), lr=lr)
-        self.loss_func = nn.SmoothL1Loss()
-        self.loss_250 = 0
-        self.loss = []
+        super(DQNPlayer, self).__init__(epsilon=epsilon, player=player)
+        self.lr = lr # learning rate
+        self.decay = decay # decaying factor
+        self.eps_min = 0.01
+        self.eps_max = 0.99
         self.training = True
 
+        #DQN
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.policy_net = DQNNet().to(self.device)
+        self.target_net = DQNNet().to(self.device)
+        self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=lr)
+        self.memory = ReplayMemory(MEMORY_CAPACITY)
+        self.losses = []
+        self.loss_avg = 0
+    
+    def reset(self):
+        return super().reset()
+    
     def train(self): # train mode
         self.training = True
     
     def eval(self): # eval/test mode
         self.training = False
-
-    def randomMove(self, grid):
-        '''
-        grid : 3 x 3
-        return : int
-        '''
-        available_move = []
-        for i in range(grid.shape[0]):
-            for j in range(grid.shape[1]):
-                if grid[i][j] == 0:
-                    available_move.append(3*i+j)
-        return available_move
-
-
-    def act(self, grid, **kwargs):
-        '''
-        grid : grid tensor with shape 3x3
-        player : to indicate player is 'X' or 'O'
-        '''
-        player = kwargs['player']
-        # Change grid to state tensor
-        if player == 'X':
-            opp = 'O'
-        else:
-            opp = 'X'
-
-        grid_mine = whose_grid(grid, player)
-        grid_opp = whose_grid(grid, opp)
-        x = torch.stack((grid_mine, grid_opp), axis=0)
-
-        # x : [1,18]
-        x = x.view(1, -1)
-        # input only one sample
-        if np.random.uniform() > self.epsilon and self.memory_counter > MEMORY_CAPACITY:   # greedy
-            actions_value = self.eval_net.forward(x)
-            # print("actions_value")
-            # print(actions_value)
-            action = int(actions_value.argmax())
-        else:   # random
-            avail_move = self.randomMove(grid)
-            action = random.choice(avail_move)
-            # action = np.random.randint(0, N_ACTIONS)
-        assert action < 9 and action >-1
-        return action
-
-    def store_transition(self, s, a, r, s_, s_terminal):
-        '''
-        s : The state of this round
-        a : The action taken of this round
-        r : The reward got of this round
-        s_ : The state of next round
-        s_terminal : The symbol of terminal
-        '''
-        # s and s_ shape [1, 18]
-        s = s.view(1, -1)
-        s_ = s_.view(1, -1)
-        # a_r shape [1,2]
-        a_r = torch.Tensor([a, r]).view(1, -1)
-        s_t = torch.Tensor([s_terminal]).view(1,-1)
-        # print(s_terminal)
-        #transition shape [1, 36]
-        transition = torch.hstack((s, a_r, s_, s_t))
-        # replace the old memory with new memory
-        index = self.memory_counter % MEMORY_CAPACITY
-        self.memory[index, :] = transition
-        self.memory_counter += 1
-
+    
+    def update_target(self):
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+    
     def learn(self):
-        if self.memory_counter > MEMORY_CAPACITY:
-            # target parameter update
-            if self.learn_step_counter % TARGET_REPLACE_ITER == 0:
-                self.target_net.load_state_dict(self.eval_net.state_dict())
-            self.learn_step_counter += 1
+        if len(self.memory) < BATCH_SIZE:
+            return
+        transitions = self.memory.sample(BATCH_SIZE)
+        # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
+        # detailed explanation). This converts batch-array of Transitions
+        # to Transition of batch-arrays.
+        batch = Transition(*zip(*transitions))
+        non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
+                                          batch.next_state)), device=self.device, dtype=torch.bool)
+        non_final_next_states = torch.cat([s for s in batch.next_state
+                                                    if s is not None]).to(self.device)
+        state_batch = torch.cat(batch.state).to(self.device)
+        action_batch = torch.cat(batch.action).to(self.device)
+        reward_batch = torch.cat(batch.reward).to(self.device)
 
-            # sample batch transitions
-            sample_index = np.random.choice(MEMORY_CAPACITY, BATCH_SIZE)
-            b_memory = self.memory[sample_index, :]
-            # print("mm")
-            # print(self.memory[-1,:])
-            b_s = torch.Tensor(b_memory[:, :N_STATES])
-            b_a = torch.LongTensor(b_memory[:, N_STATES:N_STATES+1].long())
-            b_r = torch.Tensor(b_memory[:, N_STATES+1:N_STATES+2])
-            b_s_ = torch.Tensor(b_memory[:, N_STATES+2:N_STATES+20])
-            b_s_terminal = torch.Tensor(b_memory[:, -1:])
-            #b_s_ shape: [64, 18]
-            
-            # q_eval w.r.t the action in experience
-            q_eval = self.eval_net(b_s).gather(1, b_a)  # shape (batch, 1)
-            q_next = self.target_net(b_s_).detach()     # detach from graph, don't backpropagate
+        state_action_values = self.policy_net(state_batch).gather(1, action_batch.unsqueeze(1))
 
-            q_target = torch.zeros(b_r.shape)
-            max_q = self.decay * q_next.max(1)[0].view(BATCH_SIZE, 1)
+        next_state_values = torch.zeros(BATCH_SIZE, device=self.device)
+        next_state_values[non_final_mask] = self.target_net(non_final_next_states).max(1)[0].detach()
+        # Compute the expected Q values
+        expected_state_action_values = (next_state_values * self.decay) + reward_batch
 
-            for i in range(b_s_terminal.shape[0]):
-                for j in range(b_s_terminal.shape[1]):
-                    # whether terminal state
-                    if b_s_terminal[i][j].item() == 1:
-                        q_target[i][j] = b_r[i][j]
-                    else:
-                        q_target[i][j] = b_r[i][j] + max_q[i][j] 
-            # print("br")
-            # print(b_r.shape)
-            # q_target = b_r +  max_q   # shape (batch, 1)
-            loss = self.loss_func(q_eval, q_target)
+        criterion = nn.SmoothL1Loss()
+        loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
 
-            # Calculate reward and training loss
-            if self.memory_counter % 250 == 0:
-                self.loss.append(self.loss_250 / 250.)
-                self.loss_250 = 0
-            else:
-                self.loss_250 += loss.item()
-            
-        
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+        # Optimize the model
+        self.optimizer.zero_grad()
+        loss.backward()
+        for param in self.policy_net.parameters():
+            param.grad.data.clamp_(-1, 1)
+        self.optimizer.step()
+    
+        if len(self.memory) % 250 == 0:
+            self.losses.append(self.loss_avg / 250.)
+            self.loss_avg = 0
+        self.loss_avg += loss.item()
+
+    def decay_eps(self, epoch, epoch_star=1):
+        self.epsilon = max(self.eps_min, self.eps_max*(1-epoch/epoch_star))
+
+    def store_transition(self, state, action, next_state, reward):
+        self.memory.push(state, action, next_state, reward)
+
+    def act(self, grid, **kwargs): # rewrite act
+        # whether move in random or not
+        if self.training and (random.random() < self.epsilon or len(self.memory) < BATCH_SIZE):
+            return self.randomMove(grid)
+        # assert it is the player's turn
+        if self.player=='X':
+            assert sum(sum(grid)) <= 0
         else:
-            pass
+            assert sum(sum(grid)) > 0
+
+        state = grid2state(grid, self.player).to(self.device)
+        
+        with torch.no_grad():
+            # t.max(1) will return largest column value of each row.
+            # second column on max result is index of where max element was
+            # found, so we pick action with the larger expected reward.
+            return a_to_pos(int(self.policy_net(state).max(1)[1].view(1, 1).item()))
 
 
-class DQlearningEnv(TictactoeEnv):
+class DQNlearningEnv(QlearningEnv):
     def __init__(self, player1: OptimalPlayer, player2: OptimalPlayer, Q=None):
-        super(DQlearningEnv, self).__init__()
-        self.player1 = player1 # player X at the each game
-        self.player2 = player2 # player O at the each game
-        self.training_reward_list = defaultdict(list) # see record_reward(self)
-        self.test_reward_list = defaultdict(list) # see record_reward(self)
-        self.training_loss_list = defaultdict(list)
-        self.test_avg_reward = defaultdict(list)
-        self.decay_eps = False # whether decay epsilon
-        self.testing = False 
-        self.s_terminal = torch.zeros((2,3,3))
-        self.loss = 0
+        super(DQNlearningEnv, self).__init__(player1=player1, player2=player2)
 
-        self.dict_p1 = {'player' : self.player1.player} 
-        self.dict_p2 = {'player' : self.player2.player} 
-        # if Q is None:
-        #     Q = defaultdict(lambda: defaultdict(int))
-        # self.Q = {'Q': Q} # we use a dict here to match act method in OptimalPlayer.
+    def pos_available(self, pos):
+        pos_x, pos_y = pos
+        return self.grid[pos_x][pos_y] == 0
+    
     def backprop(self):
         self.player1.learn()
         self.player2.learn()
-
-    def reset_all(self):
-        # reset env by clearing game board and empty player's history
-        # but do not modify player's Q function.
-        self.reset()
-        # self.player1.reset()
-        # self.player2.reset()
-
-    def set_decay_eps(self, epoch_star=1):
-        # enable decaying epsilon
-        self.decay_eps = True
-        self.epoch_star = epoch_star # n* in the paper
-    
-    def set_testing(self, test_eps=0, test_per_epoch=250):
-        # enable test every test_per_epoch
-        self.testing = True
-        self.test_per_epoch = test_per_epoch
-        self.test_player = None
-        self.test_eps = test_eps
-
-    def record_reward(self, training=True):
-        # we always record reward for player 'X' at self.training_reward_list['X']
-        # and record for player 'O' at self.training_reward_list['O'].
-        #  No matter which player we are training. 
-        # Similarly for self.test_reward_list
-        if training:
-            reward_list = self.training_reward_list
-            # loss_list = self.training_loss_list
-        else:
-            reward_list = self.test_reward_list
-        if self.winner == 'X':
-            reward_list['X'].append(1)
-            reward_list['O'].append(-1)
-        elif self.winner == 'O':
-            reward_list['X'].append(-1)
-            reward_list['O'].append(1)
-        else:
-            reward_list['X'].append(0)
-            reward_list['O'].append(0)
-        
-        # loss_list.append(self.loss)
-    
-    def get_reward(self, player=1, training=True):
-        # player=1 if we want to get reward from the 1st player while input
-        # player=2 if 2nd
-        # since we switch the player after each game, the 1st player will get all odd position 
-        # from ['X'] and even position from ['O']. 
-        def connect_lst(list1, list2):
-            result = [None]*(len(list1)+len(list2))
-            result[::2] = list1
-            result[1::2] = list2
-            return result
-
-        if training:
-            reward_list = self.training_reward_list
-        else:
-            reward_list = self.test_reward_list
-
-        if player==1:
-            return connect_lst(reward_list['X'][0::2], reward_list['O'][1::2])
-        elif player==2:
-            return connect_lst(reward_list['O'][0::2], reward_list['X'][1::2])
-        else:
-            raise NotImplementedError
     
     def get_loss(self):
-        if isinstance(self.player1, DQN):
-            return self.player1.loss
-        elif isinstance(self.player2, DQN):
-            return self.player2.loss
+        if isinstance(self.player1, DQNPlayer):
+            return self.player1.losses
+        elif isinstance(self.player2, DQNPlayer):
+            return self.player2.losses
         else:
             print("Class error!")
-
-    def grid_to_state(self, grid, player):
-        '''
-        Transform current grid to current state
-        grid is of shape 3x3
-        expteced state is of shape 2x3x3
-        '''
-        if player == 'X':
-            opp = 'O'
-        else:
-            opp = 'X'
-
-        grid_mine = whose_grid(grid, player)
-        grid_opp = whose_grid(grid, opp)
-
-        if player == self.player1.player and isinstance(self.player1, DQN):
-            x = torch.stack((grid_mine, grid_opp), axis=0)
-        elif player == self.player2.player and isinstance(self.player2, DQN):
-            x = torch.stack((grid_mine, grid_opp), axis=0)
-        else:
-            x = torch.stack((grid_opp, grid_mine), axis=0)
-
-        # x = torch.stack((grid_mine, grid_opp), axis=0)
         
-        return x
 
-    def action_available(self, grid, action):
-        '''
-        grid : numpy array of 3x3
-        action : tuple or int
-        '''
-        if isinstance(action, int):
-            pos_x, pos_y = a_to_pos(action)
-        elif isinstance(action, tuple):
-            pos_x, pos_y = action
-        else:
-            print("type error!!!")
-        
-        if grid[pos_x][pos_y] == 0:
-            return True
-        else:
-            return False
-    
     def train(self, epochs=1000):
         assert epochs%2==0, 'use even number of games'
         for epoch in range(epochs):
@@ -954,71 +809,58 @@ class DQlearningEnv(TictactoeEnv):
             self.player1.train() # train mode, update Q.
             self.player2.train()
             self.reset_all()
+            if epoch % TARGET_REPLACE_ITER == 0:
+                self.player1.update_target()
+                self.player2.update_target()
+
             if self.decay_eps: # decay eps every epoch if self.decay_eps
                 self.player1.decay_eps(epoch, self.epoch_star)
                 self.player2.decay_eps(epoch, self.epoch_star)
             while True:
-                p1_action = self.player1.act(self.grid, **self.dict_p1)
-                s_t = self.grid_to_state(self.grid, self.player1.player)
-                if self.action_available(self.grid, p1_action):
-                    next_grid, _, _ = self.step(p1_action)
-                    s_next = self.grid_to_state(next_grid, self.player1.player)
+                pos = self.player1.act(self.grid)
+                action = pos_to_a(pos)
+                action = torch.tensor([action],dtype=int)
+                state = grid2state(self.grid, "X")
+                if self.pos_available(pos):
+                    self.step(pos)
+                    next_state = grid2state(self.grid, "X")
                     self.checkEnd()
-                    r1 = self.reward(self.player1.player)
-                    if isinstance(p1_action, tuple):
-                        pos_x, pos_y = p1_action
-                        p1_action = pos_x * 3 + pos_y
-                    
-                    if self.end:
-                        self.player1.store_transition(s_t, p1_action, r1, s_next, 1)
-                    else:
-                        self.player1.store_transition(s_t, p1_action, r1, s_next, 0)
-                    
+                    reward = self.reward("X")
+                    reward = torch.tensor([reward],dtype=float)
+                    self.player1.store_transition(state, action, next_state, reward)
                 else:
-                    r1 = -1
                     self.end = True
-                    self.winner = self.player2.player
-                    self.player1.store_transition(s_t, p1_action, r1, self.s_terminal, 1) # self.s_terminal
-                
-                self.backprop()
-                self.checkEnd()
+                    self.winner = "O"
+                    self.player1.store_transition(state, action, None, torch.tensor([-1],dtype=float))
+                # self.backprop()
                 if self.end: # end after first player's move
-                    # self.backprop() # update Q values for both players.
+                    self.backprop()
                     self.record_reward() # record reward for this game
                     self.reset_all() # reset env board and clear player's history (for update Q).
                     break
                 else:
-                    p2_action = self.player2.act(self.grid, **self.dict_p2)
-                    s_t = self.grid_to_state(self.grid, self.player2.player)
-                    if self.action_available(self.grid, p2_action):
-                        next_grid, _, _ = self.step(p2_action)
-                        s_next = self.grid_to_state(next_grid, self.player2.player)
+                    pos = self.player2.act(self.grid)
+                    action = pos_to_a(pos)
+                    action = torch.tensor([action],dtype=int)
+                    state = grid2state(self.grid, "O")
+                    if self.pos_available(pos):
+                        self.step(pos)
+                        next_state = grid2state(self.grid, "O")
                         self.checkEnd()
-                        r2 = self.reward(self.player2.player)
-                        if isinstance(p2_action, tuple):
-                            pos_x, pos_y = p2_action
-                            p2_action = pos_x * 3 + pos_y
-                        if self.end:
-                            self.player2.store_transition(s_t, p2_action, r2, s_next, 1)
-                        else:
-                            self.player2.store_transition(s_t, p2_action, r2, s_next, 0)
-                        
+                        reward = self.reward("O")
+                        reward = torch.tensor([reward],dtype=float)
+                        self.player2.store_transition(state, action, next_state, reward)
                     else:
-                        r2 = -1
                         self.end = True
-                        self.winner = self.player1.player
-                        self.player2.store_transition(s_t, p2_action, r2, self.s_terminal, 1)
-                    
-                    self.backprop()
-                    self.checkEnd()
-                    if self.end: # end after second player's move
+                        self.winner = "X"
+                        self.player2.store_transition(state, action, None, torch.tensor([-1],dtype=float))
+                    # self.backprop()
+                    if self.end: # end after first player's move
                         self.backprop()
-                        self.record_reward()
-                        self.reset_all()
+                        self.record_reward() # record reward for this game
+                        self.reset_all() # reset env board and clear player's history (for update Q).
                         break
-                
-                # s_t = s_next
-            
+
             if self.testing and (epoch+1) % self.test_per_epoch == 0:
                 if epoch % 2==0:
                     self.test_player = deepcopy(self.player1)
@@ -1027,7 +869,7 @@ class DQlearningEnv(TictactoeEnv):
                 self.test_player.player = 'X' # we always set the test player as 'X'
                 self.test_player.epsilon = self.test_eps
                 self.test_player.reset()
-                assert(isinstance(self.test_player, DQN))
+                assert(isinstance(self.test_player, DQNPlayer))
                 self.test_avg_reward['random'].append(self.test(deepcopy(self.test_player), 'random'))
                 self.test_avg_reward['optimal'].append(self.test(deepcopy(self.test_player), 'optimal'))
 
@@ -1037,8 +879,7 @@ class DQlearningEnv(TictactoeEnv):
         self.player2.player = 'O'
 
 
-
-    def test(self, player: DQN, target_player_type: str, epochs=500):
+    def test(self, player: OptimalPlayer, target_player_type: str, epochs=500):
         self.test_reward_list = defaultdict(list)
         if target_player_type == 'random':
             target_player = OptimalPlayer(epsilon=1.0, player='O')
@@ -1060,17 +901,25 @@ class DQlearningEnv(TictactoeEnv):
             player2.eval()
             self.reset_all()
             while True:
-                p1_action = player1.act(self.grid, **self.Q)
-                self.step(p1_action)
-                self.checkEnd()
+                pos = player1.act(self.grid)
+                if self.pos_available(pos):
+                    self.step(pos)
+                    self.checkEnd()
+                else:
+                    self.end = True
+                    self.winner = "O"
                 if self.end: # end after player 1's move
                     self.record_reward(training=False)
                     self.reset_all()
                     break
                 else:
-                    p2_action = player2.act(self.grid, **self.Q)
-                    self.step(p2_action)
-                    self.checkEnd()
+                    pos = player2.act(self.grid)
+                    if self.pos_available(pos):
+                        self.step(pos)
+                        self.checkEnd()
+                    else:
+                        self.end = True
+                        self.winner = "X"
                     if self.end: # end after player 2's move
                         self.record_reward(training=False)
                         self.reset_all()

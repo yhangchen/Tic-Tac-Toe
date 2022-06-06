@@ -712,8 +712,8 @@ class DQNPlayer(OptimalPlayer):
         super(DQNPlayer, self).__init__(epsilon=epsilon, player=player)
         self.lr = lr # learning rate
         self.decay = decay # decaying factor
-        self.eps_min = 0.1
-        self.eps_max = 0.8
+        self.eps_min = 0.01
+        self.eps_max = 0.99
         self.training = True
 
         #DQN

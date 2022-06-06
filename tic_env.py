@@ -1,4 +1,7 @@
 # import gym
+from email import policy
+from sre_parse import State
+from telnetlib import STATUS
 from matplotlib.style import available
 import numpy as np
 import random
@@ -356,7 +359,7 @@ class OptimalPlayer:
     def backprop(self, reward, Q):
         pass
 
-    def learn(self, memory, **kwargs):
+    def learn(self, **kwargs):
         pass    
 
     def reset(self):
@@ -614,26 +617,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from collections import namedtuple, deque
 
-def whose_grid(g, player):
-    '''
-    g is a grid matrix of 3 x 3
-    player : X for me, O for oppenent
-    '''
-    if player == 'X':
-        color = 1
-    else:
-        color = -1
-
-    res = torch.zeros(g.shape)
-    for x in range(g.shape[0]):
-        for y in range(g.shape[1]):
-            if g[x][y] == color:
-                res[x][y] = 1
-            else:
-                res[x][y] = 0
-
-    return res
-
 def a_to_pos(a):
     '''
     a : int [0,8]
@@ -717,12 +700,8 @@ class DQNPlayer(OptimalPlayer):
         self.training = True
 
         #DQN
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.policy_net = DQNNet().to(self.device)
-        self.target_net = DQNNet().to(self.device).eval()
-        self.update_target()
-        self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=lr)
         self.loss = 0
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
     
     def reset(self):
         return super().reset()
@@ -735,33 +714,36 @@ class DQNPlayer(OptimalPlayer):
     
     def eval(self): # eval/test mode
         self.training = False
-    
-    def update_target(self):
-        self.target_net.load_state_dict(self.policy_net.state_dict())
-    
-    def learn(self, memory: ReplayMemory, **kwargs):
+        
+    def learn(self, **kwargs):
         batch_size = kwargs.get("batch_size", BATCH_SIZE)
+        memory = kwargs.get("memory")
         if len(memory) < batch_size:
             return
         transitions = memory.sample(batch_size)
+        policy_net = kwargs.get("policy_net")
+        target_net = kwargs.get("target_net")
+        optimizer  = kwargs.get("optimizer")
+        device = kwargs.get("device")
+
         # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
         # detailed explanation). This converts batch-array of Transitions
         # to Transition of batch-arrays.
         batch = Transition(*zip(*transitions))
         non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
-                                          batch.next_state)), device=self.device, dtype=torch.bool)
+                                          batch.next_state)), device=device, dtype=torch.bool)
         non_final = [s for s in batch.next_state if s is not None]
-        non_final_next_states = torch.cat(non_final).to(self.device) if len(non_final) else None
-        state_batch = torch.cat(batch.state).to(self.device)
-        action_batch = torch.cat(batch.action).to(self.device)
-        reward_batch = torch.cat(batch.reward).to(self.device)
+        non_final_next_states = torch.cat(non_final).to(device) if len(non_final) else None
+        state_batch = torch.cat(batch.state).to(device)
+        action_batch = torch.cat(batch.action).to(device)
+        reward_batch = torch.cat(batch.reward).to(device)
 
-        state_action_values = self.policy_net(state_batch).gather(1, action_batch.unsqueeze(1))
+        state_action_values = policy_net(state_batch).gather(1, action_batch.unsqueeze(1))
 
-        next_state_values = torch.zeros(batch_size, device=self.device)
+        next_state_values = torch.zeros(batch_size, device=device)
         if non_final_next_states is not None:
             # id non_final_next_states is None, then non_final_mask is empty
-            next_state_values[non_final_mask] = self.target_net(non_final_next_states).max(1)[0].detach()
+            next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0].detach()
         # Compute the expected Q values
         expected_state_action_values = (next_state_values * self.decay) + reward_batch
 
@@ -769,11 +751,11 @@ class DQNPlayer(OptimalPlayer):
         loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
         self.loss += loss.item()
         # Optimize the model
-        self.optimizer.zero_grad()
+        optimizer.zero_grad()
         loss.backward()
-        for param in self.policy_net.parameters():
+        for param in policy_net.parameters():
             param.grad.data.clamp_(-1, 1)
-        self.optimizer.step()
+        optimizer.step()
     
     def decay_eps(self, epoch, epoch_star=1):
         self.epsilon = max(self.eps_min, self.eps_max*(1-epoch/epoch_star))
@@ -789,12 +771,12 @@ class DQNPlayer(OptimalPlayer):
             assert sum(sum(grid)) > 0
 
         state = grid2state(grid, self.player).to(self.device)
-        
+        policy_net = kwargs.get("policy_net")
         with torch.no_grad():
             # t.max(1) will return largest column value of each row.
             # second column on max result is index of where max element was
             # found, so we pick action with the larger expected reward.
-            return a_to_pos(int(self.policy_net(state).max(1)[1].view(1, 1).item()))
+            return a_to_pos(int(policy_net(state).max(1)[1].view(1, 1).item()))
 
 
 class DQNlearningEnv(QlearningEnv):
@@ -803,6 +785,12 @@ class DQNlearningEnv(QlearningEnv):
         self.memory = ReplayMemory(MEMORY_CAPACITY)
         self.batch_one = False
         self.losses = []
+        self.lr = 5e-4
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.policy_net = DQNNet().to(self.device)
+        self.target_net = DQNNet().to(self.device).eval()
+        self.update_target()
+        self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=self.lr)
 
     def pos_available(self, pos):
         pos_x, pos_y = pos
@@ -811,14 +799,21 @@ class DQNlearningEnv(QlearningEnv):
     def set_batch_one(self):
         self.batch_one = True
         self.memory = ReplayMemory(1)
-    
+
+    def update_target(self):
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+
     def backprop(self):
         if self.batch_one:
-            self.player1.learn(self.memory, batch_size=1)
-            self.player2.learn(self.memory, batch_size=1)
+            self.player1.learn(memory=self.memory, batch_size=1, policy_net=self.policy_net,
+            target_net=self.target_net, optimizer=self.optimizer, device=self.device)
+            self.player2.learn(memory=self.memory, batch_size=1, policy_net=self.policy_net,
+            target_net=self.target_net, optimizer=self.optimizer, device=self.device)
         else:
-            self.player1.learn(self.memory)
-            self.player2.learn(self.memory)
+            self.player1.learn(memory=self.memory, policy_net=self.policy_net,
+            target_net=self.target_net, optimizer=self.optimizer, device=self.device)
+            self.player2.learn(memory=self.memory, policy_net=self.policy_net,
+            target_net=self.target_net, optimizer=self.optimizer, device=self.device)
     
     def get_loss(self):
         if isinstance(self.player1, DQNPlayer):
@@ -844,21 +839,26 @@ class DQNlearningEnv(QlearningEnv):
             self.player2.train()
             self.reset_all()
             if epoch % TARGET_REPLACE_ITER == 0:
-                self.player1.update_target()
-                self.player2.update_target()
+                self.update_target()
 
             if self.decay_eps: # decay eps every epoch if self.decay_eps
                 self.player1.decay_eps(epoch, self.epoch_star)
                 self.player2.decay_eps(epoch, self.epoch_star)
             state_2 = action_2 = reward_2 = None
             while True:
-                pos = self.player1.act(self.grid, memory_len = len(self.memory))
+                pos = self.player1.act(self.grid, memory_len = len(self.memory), policy_net = self.policy_net)
                 action_1 = pos_to_a(pos)
                 action_1 = torch.tensor([action_1],dtype=int)
-                state_1 = grid2state(self.grid, "X")
+                if epoch % 2 == 0:
+                    state_1 = grid2state(self.grid, "X")
+                else:
+                    state_1 = grid2state(self.grid, "O")
                 if self.pos_available(pos):
                     self.step(pos)
-                    next_state_2 = grid2state(self.grid, "O")
+                    if epoch % 2 == 0:
+                        next_state_2 = grid2state(self.grid, "X")
+                    else:
+                        next_state_2 = grid2state(self.grid, "O")
                     reward_1 = self.reward("X")
                     reward_1 = torch.tensor([reward_1],dtype=float)
                     if self.end:
@@ -878,13 +878,19 @@ class DQNlearningEnv(QlearningEnv):
                     self.reset_all() # reset env board and clear player's history (for update Q).
                     break
                 else:
-                    pos = self.player2.act(self.grid, memory_len = len(self.memory))
+                    pos = self.player2.act(self.grid, memory_len = len(self.memory), policy_net = self.policy_net)
                     action_2 = pos_to_a(pos)
                     action_2 = torch.tensor([action_2],dtype=int)
-                    state_2 = grid2state(self.grid, "O")
+                    if epoch % 2 == 0:
+                        state_2 = grid2state(self.grid, "X")
+                    else:
+                        state_2 = grid2state(self.grid, "O")
                     if self.pos_available(pos):
                         self.step(pos)
-                        next_state_1 = grid2state(self.grid, "X")
+                        if epoch % 2 == 0:
+                            next_state_1 = grid2state(self.grid, "X")
+                        else:
+                            next_state_1 = grid2state(self.grid, "O")
                         reward_2 = self.reward("O")
                         reward_2 = torch.tensor([reward_2],dtype=float)
                         if self.end:
@@ -944,7 +950,7 @@ class DQNlearningEnv(QlearningEnv):
             player2.eval()
             self.reset_all()
             while True:
-                pos = player1.act(self.grid)
+                pos = player1.act(self.grid, memory_len = len(self.memory), policy_net = self.policy_net)
                 if self.pos_available(pos):
                     self.step(pos)
                     self.checkEnd()
@@ -956,7 +962,7 @@ class DQNlearningEnv(QlearningEnv):
                     self.reset_all()
                     break
                 else:
-                    pos = player2.act(self.grid)
+                    pos = player2.act(self.grid, memory_len = len(self.memory), policy_net = self.policy_net)
                     if self.pos_available(pos):
                         self.step(pos)
                         self.checkEnd()

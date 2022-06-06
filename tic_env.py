@@ -350,13 +350,13 @@ class OptimalPlayer:
     def add(self, grid, move):
         pass
     
-    def store_transition(self, state, action, next_state, reward):
+    def store_transition(self, state, action, next_state, reward, player=None):
         pass
 
     def backprop(self, reward, Q):
         pass
 
-    def learn(self):
+    def learn(self, memory, **kwargs):
         pass    
 
     def reset(self):
@@ -642,14 +642,14 @@ def grid2state(grid, player):
                 res[(x,y,0)] = 1
             elif grid[x][y] == -color:
                 res[(x,y,1)] = 1
-
+    # assert(sum(sum(res[:,:,0]))<=sum(sum(res[:,:,1])))
     return res.view(1,-1)
 
 
 N_STATES = 18
 N_ACTIONS = 9
 MEMORY_CAPACITY = 10000
-TARGET_REPLACE_ITER = 500
+TARGET_REPLACE_ITER = 1000
 BATCH_SIZE = 64
 
 class DQNNet(nn.Module):
@@ -699,9 +699,9 @@ class DQNPlayer(OptimalPlayer):
         #DQN
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.policy_net = DQNNet().to(self.device)
-        self.target_net = DQNNet().to(self.device)
+        self.target_net = DQNNet().to(self.device).eval()
+        self.update_target()
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=lr)
-        self.memory = ReplayMemory(MEMORY_CAPACITY)
         self.losses = []
         self.loss_avg = 0
     
@@ -717,10 +717,11 @@ class DQNPlayer(OptimalPlayer):
     def update_target(self):
         self.target_net.load_state_dict(self.policy_net.state_dict())
     
-    def learn(self):
-        if len(self.memory) < BATCH_SIZE:
+    def learn(self, memory: ReplayMemory, **kwargs):
+        batch_size = kwargs.get("batch_size", BATCH_SIZE)
+        if len(memory) < batch_size:
             return
-        transitions = self.memory.sample(BATCH_SIZE)
+        transitions = memory.sample(batch_size)
         # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
         # detailed explanation). This converts batch-array of Transitions
         # to Transition of batch-arrays.
@@ -735,7 +736,7 @@ class DQNPlayer(OptimalPlayer):
 
         state_action_values = self.policy_net(state_batch).gather(1, action_batch.unsqueeze(1))
 
-        next_state_values = torch.zeros(BATCH_SIZE, device=self.device)
+        next_state_values = torch.zeros(batch_size, device=self.device)
         next_state_values[non_final_mask] = self.target_net(non_final_next_states).max(1)[0].detach()
         # Compute the expected Q values
         expected_state_action_values = (next_state_values * self.decay) + reward_batch
@@ -750,7 +751,7 @@ class DQNPlayer(OptimalPlayer):
             param.grad.data.clamp_(-1, 1)
         self.optimizer.step()
     
-        if len(self.memory) % 250 == 0:
+        if len(memory) % 250 == 0:
             self.losses.append(self.loss_avg / 250.)
             self.loss_avg = 0
         self.loss_avg += loss.item()
@@ -758,12 +759,9 @@ class DQNPlayer(OptimalPlayer):
     def decay_eps(self, epoch, epoch_star=1):
         self.epsilon = max(self.eps_min, self.eps_max*(1-epoch/epoch_star))
 
-    def store_transition(self, state, action, next_state, reward):
-        self.memory.push(state, action, next_state, reward)
-
     def act(self, grid, **kwargs): # rewrite act
         # whether move in random or not
-        if self.training and (random.random() < self.epsilon or len(self.memory) < BATCH_SIZE):
+        if self.training and (random.random() < self.epsilon):
             return self.randomMove(grid)
         # assert it is the player's turn
         if self.player=='X':
@@ -783,14 +781,15 @@ class DQNPlayer(OptimalPlayer):
 class DQNlearningEnv(QlearningEnv):
     def __init__(self, player1: OptimalPlayer, player2: OptimalPlayer, Q=None):
         super(DQNlearningEnv, self).__init__(player1=player1, player2=player2)
+        self.memory = ReplayMemory(MEMORY_CAPACITY)
 
     def pos_available(self, pos):
         pos_x, pos_y = pos
         return self.grid[pos_x][pos_y] == 0
     
     def backprop(self):
-        self.player1.learn()
-        self.player2.learn()
+        self.player1.learn(self.memory)
+        self.player2.learn(self.memory)
     
     def get_loss(self):
         if isinstance(self.player1, DQNPlayer):
@@ -800,6 +799,8 @@ class DQNlearningEnv(QlearningEnv):
         else:
             print("Class error!")
         
+    def store_transition(self, state, action, next_state, reward):
+        self.memory.push(state, action, next_state, reward)        
 
     def train(self, epochs=1000):
         assert epochs%2==0, 'use even number of games'
@@ -817,21 +818,20 @@ class DQNlearningEnv(QlearningEnv):
                 self.player1.decay_eps(epoch, self.epoch_star)
                 self.player2.decay_eps(epoch, self.epoch_star)
             while True:
-                pos = self.player1.act(self.grid)
+                pos = self.player1.act(self.grid, memory_len = len(self.memory))
                 action = pos_to_a(pos)
                 action = torch.tensor([action],dtype=int)
                 state = grid2state(self.grid, "X")
                 if self.pos_available(pos):
                     self.step(pos)
                     next_state = grid2state(self.grid, "X")
-                    self.checkEnd()
                     reward = self.reward("X")
                     reward = torch.tensor([reward],dtype=float)
-                    self.player1.store_transition(state, action, next_state, reward)
+                    self.store_transition(state, action, next_state, reward)
                 else:
                     self.end = True
                     self.winner = "O"
-                    self.player1.store_transition(state, action, None, torch.tensor([-1],dtype=float))
+                    self.store_transition(state, action, None, torch.tensor([-1],dtype=float))
                 # self.backprop()
                 if self.end: # end after first player's move
                     self.backprop()
@@ -839,7 +839,7 @@ class DQNlearningEnv(QlearningEnv):
                     self.reset_all() # reset env board and clear player's history (for update Q).
                     break
                 else:
-                    pos = self.player2.act(self.grid)
+                    pos = self.player2.act(self.grid, memory_len = len(self.memory))
                     action = pos_to_a(pos)
                     action = torch.tensor([action],dtype=int)
                     state = grid2state(self.grid, "O")
@@ -849,11 +849,11 @@ class DQNlearningEnv(QlearningEnv):
                         self.checkEnd()
                         reward = self.reward("O")
                         reward = torch.tensor([reward],dtype=float)
-                        self.player2.store_transition(state, action, next_state, reward)
+                        self.store_transition(state, action, next_state, reward)
                     else:
                         self.end = True
                         self.winner = "X"
-                        self.player2.store_transition(state, action, None, torch.tensor([-1],dtype=float))
+                        self.store_transition(state, action, None, torch.tensor([-1],dtype=float))
                     # self.backprop()
                     if self.end: # end after first player's move
                         self.backprop()

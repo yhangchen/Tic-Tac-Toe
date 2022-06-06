@@ -614,6 +614,26 @@ import torch.nn as nn
 import torch.nn.functional as F
 from collections import namedtuple, deque
 
+def whose_grid(g, player):
+    '''
+    g is a grid matrix of 3 x 3
+    player : X for me, O for oppenent
+    '''
+    if player == 'X':
+        color = 1
+    else:
+        color = -1
+
+    res = torch.zeros(g.shape)
+    for x in range(g.shape[0]):
+        for y in range(g.shape[1]):
+            if g[x][y] == color:
+                res[x][y] = 1
+            else:
+                res[x][y] = 0
+
+    return res
+
 def a_to_pos(a):
     '''
     a : int [0,8]

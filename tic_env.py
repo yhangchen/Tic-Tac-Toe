@@ -781,7 +781,7 @@ class DQNPlayer(OptimalPlayer):
 
     def act(self, grid, **kwargs): # rewrite act
         # whether move in random or not
-        if self.training and (random.random() < self.epsilon):
+        if self.training and (random.random() < self.epsilon or kwargs['memory_len'] <= 1000):
             return self.randomMove(grid)
         # assert it is the player's turn
         if self.player=='X':
@@ -837,21 +837,27 @@ class DQNlearningEnv(QlearningEnv):
             if self.decay_eps: # decay eps every epoch if self.decay_eps
                 self.player1.decay_eps(epoch, self.epoch_star)
                 self.player2.decay_eps(epoch, self.epoch_star)
+            state_2 = action_2 = reward_2 = None
             while True:
                 pos = self.player1.act(self.grid, memory_len = len(self.memory))
-                action = pos_to_a(pos)
-                action = torch.tensor([action],dtype=int)
-                state = grid2state(self.grid, "X")
+                action_1 = pos_to_a(pos)
+                action_1 = torch.tensor([action_1],dtype=int)
+                state_1 = grid2state(self.grid, "X")
                 if self.pos_available(pos):
                     self.step(pos)
-                    next_state = grid2state(self.grid, "X")
-                    reward = self.reward("X")
-                    reward = torch.tensor([reward],dtype=float)
-                    self.store_transition(state, action, next_state, reward)
+                    next_state_2 = grid2state(self.grid, "O")
+                    reward_1 = self.reward("X")
+                    reward_1 = torch.tensor([reward_1],dtype=float)
+                    if self.end:
+                        self.store_transition(state_1, action_1, None, reward_1)
+                        if state_2 is not None:
+                            self.store_transition(state_2, action_2, None, reward_2)
+                    if state_2 is not None:
+                        self.store_transition(state_2, action_2, next_state_2, reward_2)
                 else:
                     self.end = True
                     self.winner = "O"
-                    self.store_transition(state, action, None, torch.tensor([-1],dtype=float))
+                    self.store_transition(state_1, action_1, None, torch.tensor([-1],dtype=float))
                 # self.backprop()
                 if self.end: # end after first player's move
                     self.backprop()
@@ -860,20 +866,23 @@ class DQNlearningEnv(QlearningEnv):
                     break
                 else:
                     pos = self.player2.act(self.grid, memory_len = len(self.memory))
-                    action = pos_to_a(pos)
-                    action = torch.tensor([action],dtype=int)
-                    state = grid2state(self.grid, "O")
+                    action_2 = pos_to_a(pos)
+                    action_2 = torch.tensor([action_2],dtype=int)
+                    state_2 = grid2state(self.grid, "O")
                     if self.pos_available(pos):
                         self.step(pos)
-                        next_state = grid2state(self.grid, "O")
-                        self.checkEnd()
-                        reward = self.reward("O")
-                        reward = torch.tensor([reward],dtype=float)
-                        self.store_transition(state, action, next_state, reward)
-                    else:
+                        next_state_1 = grid2state(self.grid, "X")
+                        reward_2 = self.reward("O")
+                        reward_2 = torch.tensor([reward_2],dtype=float)
+                        if self.end:
+                            self.store_transition(state_1, action_1, None, reward_1)
+                            self.store_transition(state_2, action_2, None, reward_2)
+                        else:
+                            self.store_transition(state_1, action_1, next_state_1, reward_1)
+                    else: 
                         self.end = True
                         self.winner = "X"
-                        self.store_transition(state, action, None, torch.tensor([-1],dtype=float))
+                        self.store_transition(state_2, action_2, None, torch.tensor([-1],dtype=float))
                     # self.backprop()
                     if self.end: # end after first player's move
                         self.backprop()

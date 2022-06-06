@@ -712,8 +712,8 @@ class DQNPlayer(OptimalPlayer):
         super(DQNPlayer, self).__init__(epsilon=epsilon, player=player)
         self.lr = lr # learning rate
         self.decay = decay # decaying factor
-        self.eps_min = 0.01
-        self.eps_max = 0.99
+        self.eps_min = 0.1
+        self.eps_max = 0.8
         self.training = True
 
         #DQN
@@ -722,11 +722,13 @@ class DQNPlayer(OptimalPlayer):
         self.target_net = DQNNet().to(self.device).eval()
         self.update_target()
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=lr)
-        self.losses = []
-        self.loss_avg = 0
+        self.loss = 0
     
     def reset(self):
         return super().reset()
+    
+    def reset_losses(self):
+        self.loss = 0
     
     def train(self): # train mode
         self.training = True
@@ -748,8 +750,8 @@ class DQNPlayer(OptimalPlayer):
         batch = Transition(*zip(*transitions))
         non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
                                           batch.next_state)), device=self.device, dtype=torch.bool)
-        non_final_next_states = torch.cat([s for s in batch.next_state
-                                                    if s is not None]).to(self.device)
+        non_final = [s for s in batch.next_state if s is not None]
+        non_final_next_states = torch.cat(non_final).to(self.device) if len(non_final) else None
         state_batch = torch.cat(batch.state).to(self.device)
         action_batch = torch.cat(batch.action).to(self.device)
         reward_batch = torch.cat(batch.reward).to(self.device)
@@ -757,13 +759,15 @@ class DQNPlayer(OptimalPlayer):
         state_action_values = self.policy_net(state_batch).gather(1, action_batch.unsqueeze(1))
 
         next_state_values = torch.zeros(batch_size, device=self.device)
-        next_state_values[non_final_mask] = self.target_net(non_final_next_states).max(1)[0].detach()
+        if non_final_next_states is not None:
+            # id non_final_next_states is None, then non_final_mask is empty
+            next_state_values[non_final_mask] = self.target_net(non_final_next_states).max(1)[0].detach()
         # Compute the expected Q values
         expected_state_action_values = (next_state_values * self.decay) + reward_batch
 
         criterion = nn.SmoothL1Loss()
         loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
-
+        self.loss += loss.item()
         # Optimize the model
         self.optimizer.zero_grad()
         loss.backward()
@@ -771,17 +775,12 @@ class DQNPlayer(OptimalPlayer):
             param.grad.data.clamp_(-1, 1)
         self.optimizer.step()
     
-        if len(memory) % 250 == 0:
-            self.losses.append(self.loss_avg / 250.)
-            self.loss_avg = 0
-        self.loss_avg += loss.item()
-
     def decay_eps(self, epoch, epoch_star=1):
         self.epsilon = max(self.eps_min, self.eps_max*(1-epoch/epoch_star))
 
     def act(self, grid, **kwargs): # rewrite act
         # whether move in random or not
-        if self.training and (random.random() < self.epsilon or kwargs['memory_len'] <= 1000):
+        if self.training and (random.random() < self.epsilon):
             return self.randomMove(grid)
         # assert it is the player's turn
         if self.player=='X':
@@ -802,22 +801,36 @@ class DQNlearningEnv(QlearningEnv):
     def __init__(self, player1: OptimalPlayer, player2: OptimalPlayer, Q=None):
         super(DQNlearningEnv, self).__init__(player1=player1, player2=player2)
         self.memory = ReplayMemory(MEMORY_CAPACITY)
+        self.batch_one = False
+        self.losses = []
 
     def pos_available(self, pos):
         pos_x, pos_y = pos
         return self.grid[pos_x][pos_y] == 0
     
+    def set_batch_one(self):
+        self.batch_one = True
+        self.memory = ReplayMemory(1)
+    
     def backprop(self):
-        self.player1.learn(self.memory)
-        self.player2.learn(self.memory)
+        if self.batch_one:
+            self.player1.learn(self.memory, batch_size=1)
+            self.player2.learn(self.memory, batch_size=1)
+        else:
+            self.player1.learn(self.memory)
+            self.player2.learn(self.memory)
     
     def get_loss(self):
         if isinstance(self.player1, DQNPlayer):
-            return self.player1.losses
+            res = self.player1.loss
+            self.player1.reset_losses()
+            return res
         elif isinstance(self.player2, DQNPlayer):
-            return self.player2.losses
+            res = self.player2.loss
+            self.player2.reset_losses()
+            return res
         else:
-            print("Class error!")
+            ValueError("not DQNPlayer!")
         
     def store_transition(self, state, action, next_state, reward):
         self.memory.push(state, action, next_state, reward)        
@@ -903,6 +916,7 @@ class DQNlearningEnv(QlearningEnv):
                 self.test_avg_reward['optimal'].append(self.test(deepcopy(self.test_player), 'optimal'))
 
             # switch the 1st player after every game
+            self.losses.append(self.get_loss())
             self.player1, self.player2 = self.player2, self.player1
         self.player1.player = 'X'
         self.player2.player = 'O'

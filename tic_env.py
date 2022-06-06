@@ -695,8 +695,8 @@ class DQNPlayer(OptimalPlayer):
         super(DQNPlayer, self).__init__(epsilon=epsilon, player=player)
         self.lr = lr # learning rate
         self.decay = decay # decaying factor
-        self.eps_min = 0.01
-        self.eps_max = 0.99
+        self.eps_min = 0.1
+        self.eps_max = 0.8
         self.training = True
 
         #DQN
@@ -791,6 +791,9 @@ class DQNlearningEnv(QlearningEnv):
         self.target_net = DQNNet().to(self.device).eval()
         self.update_target()
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=self.lr)
+        self.switch = True
+        if isinstance(self.player1, DQNPlayer) and isinstance(self.player2, DQNPlayer):
+            self.switch = False
 
     def pos_available(self, pos):
         pos_x, pos_y = pos
@@ -849,16 +852,16 @@ class DQNlearningEnv(QlearningEnv):
                 pos = self.player1.act(self.grid, memory_len = len(self.memory), policy_net = self.policy_net)
                 action_1 = pos_to_a(pos)
                 action_1 = torch.tensor([action_1],dtype=int)
-                if epoch % 2 == 0:
-                    state_1 = grid2state(self.grid, "X")
-                else:
+                if epoch % 2 == 1 and self.switch: # wehn switch and odd epoch, view the state from O
                     state_1 = grid2state(self.grid, "O")
+                else:
+                    state_1 = grid2state(self.grid, "X")
                 if self.pos_available(pos):
                     self.step(pos)
-                    if epoch % 2 == 0:
-                        next_state_2 = grid2state(self.grid, "X")
-                    else:
+                    if epoch % 2 == 1 and self.switch:
                         next_state_2 = grid2state(self.grid, "O")
+                    else:
+                        next_state_2 = grid2state(self.grid, "X")
                     reward_1 = self.reward("X")
                     reward_1 = torch.tensor([reward_1],dtype=float)
                     if self.end:
@@ -881,16 +884,16 @@ class DQNlearningEnv(QlearningEnv):
                     pos = self.player2.act(self.grid, memory_len = len(self.memory), policy_net = self.policy_net)
                     action_2 = pos_to_a(pos)
                     action_2 = torch.tensor([action_2],dtype=int)
-                    if epoch % 2 == 0:
-                        state_2 = grid2state(self.grid, "X")
-                    else:
+                    if epoch % 2 == 1 and self.switch:
                         state_2 = grid2state(self.grid, "O")
+                    else:
+                        state_2 = grid2state(self.grid, "X")
                     if self.pos_available(pos):
                         self.step(pos)
-                        if epoch % 2 == 0:
-                            next_state_1 = grid2state(self.grid, "X")
-                        else:
+                        if epoch % 2 == 1 and self.switch:
                             next_state_1 = grid2state(self.grid, "O")
+                        else:
+                            next_state_1 = grid2state(self.grid, "X")
                         reward_2 = self.reward("O")
                         reward_2 = torch.tensor([reward_2],dtype=float)
                         if self.end:
@@ -902,7 +905,6 @@ class DQNlearningEnv(QlearningEnv):
                         self.end = True
                         self.winner = "X"
                         self.store_transition(state_2, action_2, None, torch.tensor([-1],dtype=float))
-                    # self.backprop()
                     if self.end: # end after first player's move
                         self.backprop()
                         self.record_reward() # record reward for this game
@@ -910,10 +912,13 @@ class DQNlearningEnv(QlearningEnv):
                         break
 
             if self.testing and (epoch+1) % self.test_per_epoch == 0:
-                if epoch % 2==0:
-                    self.test_player = deepcopy(self.player1)
+                if self.switch:
+                    if epoch % 2==0:
+                        self.test_player = deepcopy(self.player1)
+                    else:
+                        self.test_player = deepcopy(self.player2)
                 else:
-                    self.test_player = deepcopy(self.player2)
+                    self.test_player = deepcopy(self.player1)
                 self.test_player.player = 'X' # we always set the test player as 'X'
                 self.test_player.epsilon = self.test_eps
                 self.test_player.reset()
@@ -923,7 +928,8 @@ class DQNlearningEnv(QlearningEnv):
 
             # switch the 1st player after every game
             self.losses.append(self.get_loss())
-            self.player1, self.player2 = self.player2, self.player1
+            if self.switch:
+                self.player1, self.player2 = self.player2, self.player1
         self.player1.player = 'X'
         self.player2.player = 'O'
 

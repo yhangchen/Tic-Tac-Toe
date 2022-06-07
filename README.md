@@ -13,7 +13,7 @@ Achieve average reward **0.96** against the random player and **0.0** against th
     - `train`: main training phase.
     - `test`: test against the random player or the optimal player.
     - `set_testing`: enable test during training.
-    - `set_decay_eps`: enable decaying $\epsilon$ during training. 
+    - `set_decay_eps`: enable decaying $\varepsilon$ during training. 
     - These classes contain self.losses, self.training_reward_list, etc to store the statistics during training. 
     - Q table or Q network and replay memory is stored in the environment rather than in the player.
 - Player
@@ -28,6 +28,21 @@ Achieve average reward **0.96** against the random player and **0.0** against th
 - Others:
   - **ReplayMemory**: replay memory for deep Q learning.
   - **DQNNet**: neural network in deep Q learning.
+
+### Algorithm Details
+#### Q learning
+The training cosists of even number of games, and the first player is switches after every game. In the environment, there are two players, which could be **OptimalPlayer** or **QPlayer**, and there is a Q table in the environment. After finishing each game in training, the Q player will update the Q table according to the episode of the most recent game, and the Q player will act according to the Q table. We use $\varepsilon$ to encourage exploration during training. 
+
+#### Deep Q learning
+The training cosists of even number of games, and the first player is switches after every game. In the environment, there are two players, which could be **OptimalPlayer** or **DQNPlayer**, and there are two networks, policy network and target network in the environment. The environment also contain a replay buffer to store transitions. The DQN player will act according to the policy network. We update the policy network after every game has finished. The implementation of policy learning and action based on Q network is standard. The key point is how the transitions is stored in the replay buffer.
+
+For each game, we assume the whole episode is $\{s_1,a_1,r_1,\cdots, s_n, a_n, r_n, {\rm None}\}$. The `None` denotes the end of an episode, which indicates either $a_n$ is an unavailable move or $s_{n+1}$ is the end of the game. We store transitions  $\{s_{2i-1}, a_{2i-1}, s_{2i+1}, r_{2i-1}\}$ and $\{s_{2i}, a_{2i}, s_{2i+2}, r_{2i}\}$ in the buffer, where the next state is the state after the opponent's movement, which could be `None`.  Since $\{s_{2i-1}, a_{2i-1}, s_{2i+1}, r_{2i-1}\}$ is player X's move, $\{s_{2i}, a_{2i}, s_{2i+2}, r_{2i}\}$ is player O's move. When push them to the buffer, we need to specify the current viewpoint, i.e.
+```
+s[2i-1] = grid2state(grid, "X“)
+s[2i] = grid2state(grid, "O“)
+```
+Another thing to pay attention to is the sparse reward problem. For each episode, $\{s_1,a_1,r_1,\cdots, s_n, a_n, r_n, {\rm None}\}$, only $r_n$ can be non-zero. We propagate the reward backward. Notice the even and odd positions of states are viewed by two players, we propose $r_i=r_n (-\alpha)^{n-i}$, where $\alpha$ is a discount factor we choose to be $\frac{1}{2}$. 
+
 
 ### Examples
 - Q learning from experts.

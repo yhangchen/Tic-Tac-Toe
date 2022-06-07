@@ -1,7 +1,7 @@
 # Tic-Tac-Toe (Q & Deep Q)
 Playing Tic-Tac-Toe with Q learning and Deep Q learning.
 
-Achieve average reward **0.96** against the random player and **0.0** against the optimal player.
+Achieve average reward **0.96** against the **random player** and **0.0** against the **optimal player**.
 
 ### Classes in tic_env.py:
 - Environment
@@ -84,8 +84,8 @@ env.train(20000)
 ```
 
 ### Assignment
-Yihang Chen: weite tic_env.py: implement Q and Deep Q learning and experiments interface; experiment on Q learning.
+Yihang Chen: write tic_env.py: implement Q and Deep Q learning, and experimental interface; experiment on Q learning; write the report.
 
-Yifei Song: experiment on Deep Q learning.
+Yifei Song: experiment on Deep Q learning; write the report.
 
 

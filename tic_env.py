@@ -831,7 +831,19 @@ class DQNlearningEnv(QlearningEnv):
             ValueError("not DQNPlayer!")
         
     def store_transition(self, state, action, next_state, reward):
-        self.memory.push(state, action, next_state, reward)        
+        self.memory.push(state, action, next_state, reward)
+    
+    def store_episode(self, episode):
+        assert len(episode) % 3 == 1
+        assert episode[-1] is None
+        num_x = (len(episode) - 1) // 3
+        reward = episode[-2]
+        # for i in range(num_x-1):
+        #     self.store_transition(episode[3*i], episode[3*i+1], episode[3*i+6],episode[3*i+2])
+        # self.store_transition(episode[3*(num_x-1)], episode[3*(num_x-1)+1], None, episode[3*(num_x-1)+2])
+        for i in range(num_x-1):
+            self.store_transition(episode[3*i], episode[3*i+1], episode[3*i+6],reward*(-0.5)**(num_x-i-1))
+        self.store_transition(episode[3*(num_x-1)], episode[3*(num_x-1)+1], None, reward)
 
     def train(self, epochs=1000):
         assert epochs%2==0, 'use even number of games'
@@ -847,35 +859,33 @@ class DQNlearningEnv(QlearningEnv):
             if self.decay_eps: # decay eps every epoch if self.decay_eps
                 self.player1.decay_eps(epoch, self.epoch_star)
                 self.player2.decay_eps(epoch, self.epoch_star)
-            state_2 = action_2 = reward_2 = None
+            episode = []
             while True:
                 pos = self.player1.act(self.grid, memory_len = len(self.memory), policy_net = self.policy_net)
                 action_1 = pos_to_a(pos)
                 action_1 = torch.tensor([action_1],dtype=int)
-                if epoch % 2 == 1 and self.switch: # wehn switch and odd epoch, view the state from O
-                    state_1 = grid2state(self.grid, "O")
-                else:
-                    state_1 = grid2state(self.grid, "X")
+                # if epoch % 2 == 1: # wehn switch and odd epoch, view the state from O
+                #     state_1 = grid2state(self.grid, "O")
+                # else:
+                state_1 = grid2state(self.grid, "X")
+                episode.append(state_1)
+                episode.append(action_1)
                 if self.pos_available(pos):
                     self.step(pos)
-                    if epoch % 2 == 1 and self.switch:
-                        next_state_2 = grid2state(self.grid, "O")
-                    else:
-                        next_state_2 = grid2state(self.grid, "X")
                     reward_1 = self.reward("X")
                     reward_1 = torch.tensor([reward_1],dtype=float)
+                    episode.append(reward_1)
                     if self.end:
-                        self.store_transition(state_1, action_1, None, reward_1)
-                        if state_2 is not None:
-                            self.store_transition(state_2, action_2, None, reward_2)
-                    if state_2 is not None:
-                        self.store_transition(state_2, action_2, next_state_2, reward_2)
+                        episode.append(None)
                 else:
                     self.end = True
                     self.winner = "O"
-                    self.store_transition(state_1, action_1, None, torch.tensor([-1],dtype=float))
+                    reward_1 = torch.tensor([-1],dtype=float)
+                    episode.append(reward_1)
+                    episode.append(None)
                 # self.backprop()
                 if self.end: # end after first player's move
+                    self.store_episode(episode)
                     self.backprop()
                     self.record_reward() # record reward for this game
                     self.reset_all() # reset env board and clear player's history (for update Q).
@@ -884,28 +894,24 @@ class DQNlearningEnv(QlearningEnv):
                     pos = self.player2.act(self.grid, memory_len = len(self.memory), policy_net = self.policy_net)
                     action_2 = pos_to_a(pos)
                     action_2 = torch.tensor([action_2],dtype=int)
-                    if epoch % 2 == 1 and self.switch:
-                        state_2 = grid2state(self.grid, "O")
-                    else:
-                        state_2 = grid2state(self.grid, "X")
+                    state_2 = grid2state(self.grid, "O")
+                    episode.append(state_2)
+                    episode.append(action_2)
                     if self.pos_available(pos):
                         self.step(pos)
-                        if epoch % 2 == 1 and self.switch:
-                            next_state_1 = grid2state(self.grid, "O")
-                        else:
-                            next_state_1 = grid2state(self.grid, "X")
                         reward_2 = self.reward("O")
                         reward_2 = torch.tensor([reward_2],dtype=float)
+                        episode.append(reward_2)
                         if self.end:
-                            self.store_transition(state_1, action_1, None, reward_1)
-                            self.store_transition(state_2, action_2, None, reward_2)
-                        else:
-                            self.store_transition(state_1, action_1, next_state_1, reward_1)
+                            episode.append(None)
                     else: 
                         self.end = True
                         self.winner = "X"
-                        self.store_transition(state_2, action_2, None, torch.tensor([-1],dtype=float))
+                        reward_2 = torch.tensor([-1],dtype=float)
+                        episode.append(reward_2)
+                        episode.append(None)
                     if self.end: # end after first player's move
+                        self.store_episode(episode)
                         self.backprop()
                         self.record_reward() # record reward for this game
                         self.reset_all() # reset env board and clear player's history (for update Q).
@@ -928,8 +934,8 @@ class DQNlearningEnv(QlearningEnv):
 
             # switch the 1st player after every game
             self.losses.append(self.get_loss())
-            if self.switch:
-                self.player1, self.player2 = self.player2, self.player1
+            # if self.switch:
+            self.player1, self.player2 = self.player2, self.player1
         self.player1.player = 'X'
         self.player2.player = 'O'
 
